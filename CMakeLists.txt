@@ -41,5 +41,5 @@ target_link_libraries(broker PRIVATE broker_lib)
 # Tools and tests TODO
 #add_subdirectory(tools/load_gen)
 #add_subdirectory(tools/bench)
-#add_subdirectory(tests)
+add_subdirectory(tests)
 
