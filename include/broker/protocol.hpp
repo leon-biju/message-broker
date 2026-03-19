@@ -8,7 +8,7 @@
  *     - Parsing/Endoding error enums: ParseError, EncodeError
  *     - Inlined encode_(MessageType) functions
  *     - Inlined parse_header function
- *     - Declaration of decode_frame and validate_header functions
+ *     - Declaration of decode_frame function
  *
  * Encoding/decoding is zero allocation. The caller MUST provide the allocated buffer for these functions
  * to write to.
@@ -19,16 +19,17 @@
 
 // TODO: Namespace this file
 
-#include <string>
+#include <bit>
 #include <cstdint>
 #include <cstring>
 #include <expected>
 #include <optional>
 #include <span>
+#include <string>
 #include <utility>
 #include <variant>
 
-#include "protocol.hpp"
+static_assert(std::endian::native == std::endian::little, "Wire protocol assumes little-endian");
 
 /*
  * MESSAGE STRUCTURE:
@@ -38,7 +39,7 @@
 
 /*************************** Constants ***************************/
 inline constexpr uint16_t MAGIC           {0xBEEF}; // Sync keyword to detect misaligned reads
-inline constexpr uint16_t PROTO_VERSION   {1};
+inline constexpr uint8_t  PROTO_VERSION   {1};
 inline constexpr size_t   MAX_TOPIC_LEN   {128};    // To cap stack allocation
 inline constexpr size_t   MAX_PAYLOAD_LEN {65536};  // 64KiB cap
 
@@ -57,9 +58,12 @@ enum class Flags : uint8_t {
     NO_ACK = 0x02,
     COMPRESSED = 0x04, //todo: implement this
 };
-// constexpr Flags operator|(Flags lhs, Flags rhs) {
-//     return static_cast<Flags>(static_cast<uint8_t>(lhs) | static_cast<uint8_t>(rhs));
-// }
+constexpr Flags operator|(Flags lhs, Flags rhs) {
+    return static_cast<Flags>(static_cast<uint8_t>(lhs) | static_cast<uint8_t>(rhs));
+}
+constexpr Flags operator&(Flags lhs, Flags rhs) {
+    return static_cast<Flags>(static_cast<uint8_t>(lhs) & static_cast<uint8_t>(rhs));
+}
 
 enum class ErrorCode : uint16_t {
     OK                = 0,
@@ -149,13 +153,12 @@ struct DecodedFrame {
 
 /*************************** Decoding functions ***************************/
 [[nodiscard]] inline std::expected<FrameHeader, ParseError> parse_header (
-    std::span<const std::byte, sizeof(FrameHeader)> raw) noexcept {
-    if constexpr (raw.size() < sizeof(FrameHeader)) return std::unexpected(ParseError::BufferTooSmall);
+    // Careful, this assumes that raw begins exactly at the header start so misaligned bytes will mess it up
+    const std::span<const std::byte> raw) noexcept {
+    if (raw.size() < sizeof(FrameHeader)) return std::unexpected(ParseError::BufferTooSmall);
 
-    std::array<std::byte, sizeof(FrameHeader)> arr; // NOLINT
-    std::ranges::copy(raw, arr.begin());
-
-    const auto header = std::bit_cast<FrameHeader>(arr);
+    FrameHeader header; // NOLINT (literally copy into it straight after)
+    std::memcpy(&header, raw.data(), sizeof(FrameHeader));
 
     if (header.magic != MAGIC) return std::unexpected(ParseError::BadMagic);
     if (header.version != PROTO_VERSION) return std::unexpected(ParseError::UnsupportedVersion);
@@ -170,14 +173,11 @@ struct DecodedFrame {
         default:
             return std::unexpected(ParseError::UnknownMessageType);
     }
-    switch (static_cast<Flags>(header.flags)) {
-        case Flags::NONE:
-        case Flags::RETAIN:
-        case Flags::NO_ACK:
-        case Flags::COMPRESSED:
-            break;
-        default:
-            return std::unexpected(ParseError::UnknownFlags);
+    constexpr uint8_t VALID_FLAGS_MASK = static_cast<uint8_t>(Flags::RETAIN)
+                                       | static_cast<uint8_t>(Flags::NO_ACK)
+                                       | static_cast<uint8_t>(Flags::COMPRESSED);
+    if (header.flags & ~VALID_FLAGS_MASK) {
+        return std::unexpected(ParseError::UnknownFlags);
     }
     if (header.payload_len > MAX_PAYLOAD_LEN) {
         return std::unexpected(ParseError::PayloadTooLarge);
@@ -202,7 +202,7 @@ struct DecodedFrame {
     const uint32_t payload_len = sizeof(topic_len) + topic_len;
     const size_t   total_len   = sizeof(FrameHeader) + payload_len;
 
-    if (total_len < buf.size()) {
+    if (total_len > buf.size()) {
         return std::unexpected(EncodeError::BufferTooSmall);
     }
 
@@ -243,7 +243,7 @@ struct DecodedFrame {
     if (payload_len > MAX_PAYLOAD_LEN) {
         return std::unexpected(EncodeError::PayloadTooLarge);
     }
-    if (total_len < buf.size()) {
+    if (total_len > buf.size()) {
         return std::unexpected(EncodeError::BufferTooSmall);
     }
 
@@ -278,7 +278,7 @@ struct DecodedFrame {
     constexpr uint32_t payload_len = sizeof(acked_seq);
     static_assert(payload_len <= MAX_PAYLOAD_LEN, "Buddy why is acked_seq so big???");
     constexpr size_t   total_len   = sizeof(FrameHeader) + payload_len;
-    if (total_len < buf.size()) {
+    if (total_len > buf.size()) {
         return std::unexpected(EncodeError::BufferTooSmall);
     }
 
@@ -312,7 +312,7 @@ struct DecodedFrame {
     }
     const size_t   total_len   = sizeof(FrameHeader) + payload_len;
 
-    if (total_len < buf.size()) {
+    if (total_len > buf.size()) {
         return std::unexpected(EncodeError::BufferTooSmall);
     }
 
@@ -339,13 +339,10 @@ struct DecodedFrame {
     return total_len;
 }
 
-[[nodiscard]] bool
-validate_header(const FrameHeader& hdr) noexcept;
-
 [[nodiscard]] std::expected<DecodedFrame, ParseError>
 decode_frame(const FrameHeader& hdr, std::span<const std::byte> payload) noexcept;
 
 std::string_view to_string(MessageType t);
-std::string_view to_string(FrameHeader& hdr);
+std::string_view to_string(ErrorCode t);
 
 #endif
