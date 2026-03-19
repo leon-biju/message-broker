@@ -23,6 +23,7 @@ include(cmake/dependencies.cmake)
 #Core library (buddy add src files here)
 add_library(broker_lib
     src/protocol.cpp
+    src/tcp_gateway.cpp
 )
 
 target_include_directories(broker_lib PUBLIC include) #Including headers as well
