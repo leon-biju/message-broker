@@ -75,7 +75,7 @@ struct ConnMeta {
 };
 
 // Decoded Message + sender fd
-struct InboundMessage { DecodedFrame frame; int sender_fd; };
+struct InboundMessage { DecodedFrame frame; int sender_fd; }; // NOLINT
 
 class TcpGateway {
     GatewayConfig   config_;

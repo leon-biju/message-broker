@@ -38,6 +38,10 @@ add_executable(broker src/main.cpp)
 target_link_libraries(broker PRIVATE broker_lib)
 
 
+# Demo client
+add_executable(client tools/client.cpp)
+target_link_libraries(client PRIVATE broker_lib)
+
 # Tools and tests TODO
 #add_subdirectory(tools/load_gen)
 #add_subdirectory(tools/bench)

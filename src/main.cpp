@@ -1,8 +1,39 @@
 #include <broker/tcp_gateway.hpp>
 #include <csignal>
+#include <chrono>
 #include <iostream>
+#include <print>
+#include <thread>
+#include <variant>
 
 static volatile sig_atomic_t g_running = 1;
+
+static void drain_queue(moodycamel::ConcurrentQueue<InboundMessage>& queue) {
+    InboundMessage msg;
+    while (g_running) {
+        if (queue.try_dequeue(msg)) {
+            const auto& hdr = msg.frame.header;
+            const auto type = static_cast<MessageType>(hdr.type);
+
+            std::visit([&](const auto& payload) {
+                using T = std::decay_t<decltype(payload)>;
+                if constexpr (std::is_same_v<T, SubscribeMsg>) {
+                    std::println("[SUBSCRIBE]   seq={} topic=\"{}\" fd={}", hdr.sequence, payload.topic, msg.sender_fd);
+                } else if constexpr (std::is_same_v<T, UnsubscribeMsg>) {
+                    std::println("[UNSUBSCRIBE] seq={} topic=\"{}\" fd={}", hdr.sequence, payload.topic, msg.sender_fd);
+                } else if constexpr (std::is_same_v<T, PublishMsg>) {
+                    std::println("[PUBLISH]     seq={} topic=\"{}\" payload_len={} fd={}", hdr.sequence, payload.topic, payload.body.size(), msg.sender_fd);
+                } else if constexpr (std::is_same_v<T, AckMsg>) {
+                    std::println("[ACK]         seq={} acked_seq={} fd={}", hdr.sequence, payload.acked_seq, msg.sender_fd);
+                } else if constexpr (std::is_same_v<T, ErrorMsg>) {
+                    std::println("[ERROR]       seq={} code={} msg=\"{}\" fd={}", hdr.sequence, to_string(payload.code), payload.error_msg, msg.sender_fd);
+                }
+            }, msg.frame.payload);
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+}
 
 int main() {
     // Balance between keeping table size low and avoiding reallocation syscall
@@ -15,6 +46,7 @@ int main() {
 
     moodycamel::ConcurrentQueue<InboundMessage> queue;
 
+    std::thread consumer(drain_queue, std::ref(queue));
 
     TcpGateway gateway(
         GatewayConfig{
@@ -31,4 +63,5 @@ int main() {
     while (g_running) pause();
 
     gateway.stop();
+    consumer.join();
 }

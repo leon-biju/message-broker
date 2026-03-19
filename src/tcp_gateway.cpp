@@ -173,11 +173,10 @@ bool TcpGateway::try_dispatch_frames(const int fd) {
             const size_t total = sizeof(FrameHeader) + conn.cached_header.payload_len;
             if (available < total) break;
 
-            // TODO: decode_frame and enqueue once protocol layer is complete
-            // auto payload = std::span(conn.buf.data() + conn.read_offset + sizeof(FrameHeader),
-            //                          conn.cached_header.payload_len);
-            // if (auto frame = decode_frame(conn.cached_header, payload))
-            //     inbound_queue_.enqueue({ *frame, fd });
+            auto payload = std::span(conn.buf.data() + conn.read_offset + sizeof(FrameHeader),
+                                     conn.cached_header.payload_len);
+            if (auto frame = decode_frame(conn.cached_header, payload))
+                inbound_queue_.enqueue({ *frame, fd });
 
             conn.read_offset += total;
             conn.stage = ParseStage::AwaitingHeader;
