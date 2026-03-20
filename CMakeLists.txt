@@ -28,7 +28,7 @@ add_library(broker_lib
 
 target_include_directories(broker_lib PUBLIC include) #Including headers as well
 
-#Remember to link crucial 3rd party libraries here
+#Remember to link crucial non bench/test only 3rd party libraries here
 target_link_libraries(broker_lib PUBLIC
     concurrentqueue
 )
@@ -38,12 +38,8 @@ add_executable(broker src/main.cpp)
 target_link_libraries(broker PRIVATE broker_lib)
 
 
-# Demo client
-add_executable(client tools/client.cpp)
-target_link_libraries(client PRIVATE broker_lib)
-
 # Tools and tests TODO
 #add_subdirectory(tools/load_gen)
-#add_subdirectory(tools/bench)
+add_subdirectory(tools)
 add_subdirectory(tests)
 
