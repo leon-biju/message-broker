@@ -114,6 +114,7 @@ struct FrameHeader {
     uint8_t     reserved1[4];    // pad rest of header to 24 bytes; todo: CRC32 Checksum here
 };
 #pragma pack(pop)
+
 static_assert(sizeof(FrameHeader) == 24, "bro frame header must be 24B");
 static_assert(alignof(FrameHeader) == 1);
 
@@ -144,9 +145,12 @@ struct ErrorMsg {
     std::string_view error_msg;
 };
 
+// Not an actual message that we can receive, but if a client disconnects then this gets pushed onto the inbound queue
+struct DisconnectMsg {};
+
 struct DecodedFrame {
     FrameHeader header;
-    std::variant<SubscribeMsg, UnsubscribeMsg, PublishMsg, AckMsg, ErrorMsg> payload;
+    std::variant<SubscribeMsg, UnsubscribeMsg, PublishMsg, AckMsg, ErrorMsg, DisconnectMsg> payload;
 };
 
 

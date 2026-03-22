@@ -195,6 +195,17 @@ bool TcpGateway::try_dispatch_frames(const int fd) {
 }
 
 void TcpGateway::handle_close(const int fd) {
+
+    // Enqueuing this message ensures the router will remove this fd from all future rounds
+    // treated like an unsubscribe from all topics
+    inbound_queue_.enqueue(InboundMessage {
+        .frame = DecodedFrame {
+            .header = {},
+            .payload = DisconnectMsg {}
+        },
+        .sender_fd = fd
+    });
+
     epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
     meta_[fd].active = false;
     --active_count_;

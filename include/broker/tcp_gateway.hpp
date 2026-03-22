@@ -66,6 +66,8 @@ enum class ParseStage { AwaitingHeader, AwaitingPayload };
 
 // Per-connection metadata. TODO: move buf into a separate buffer pool (hot/cold split)
 struct ConnMeta {
+    //This buf is what the messages rely on to keep the string view alive
+    // This MUST outlive all messages that rely on this before they get processed and die
     std::array<std::byte, READ_BUF_SIZE> buf{}; //HELL NO THIS IS AWFUL USE OF STACK
     size_t      bytes_in_buf  {0};   // write cursor: end of valid data in buf
     size_t      read_offset   {0};   // parse cursor: start of unprocessed data
