@@ -1,3 +1,3 @@
 # Demo client
-add_executable(client tools/client.cpp)
+add_executable(client client.cpp)
 target_link_libraries(client PRIVATE broker_lib)
