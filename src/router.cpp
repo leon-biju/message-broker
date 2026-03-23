@@ -40,7 +40,7 @@ void Router::run_loop() {
                 else if constexpr (std::is_same_v<T, UnsubscribeMsg>) handle_unsubscribe(msgs[i].sender_fd, payload);
                 else if constexpr (std::is_same_v<T, PublishMsg>)     handle_publish    (msgs[i].sender_fd, payload);
                 else if constexpr (std::is_same_v<T, DisconnectMsg>)  handle_disconnect (msgs[i].sender_fd);
-                else if constexpr (std::is_same_v<T, ShutdownMsg>)    return; // sentinel is in the batch; exit mid-batch, don't care about the others in the queue, or maybe we do? todo: note this
+                // ignore the shutdown message since we want to drain the queue anyway
             }, msgs[i].frame.payload);
         }
     }

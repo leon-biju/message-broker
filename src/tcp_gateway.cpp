@@ -254,7 +254,11 @@ void TcpGateway::send_loop() {
     while (send_loop_running_.load(std::memory_order_relaxed)) {
         const size_t n = outbound_queue_.wait_dequeue_bulk(batch, BATCH);
         for (size_t i = 0; i < n; ++i) {
-            if (batch[i].dest_fd == -1) return; // sentinel: exit mid-batch, recv thread already stopped so nothing follows, todo: note-- maybe we do care about the leftovers in the queue?
+
+            if (batch[i].dest_fd == -1) {
+                // sentinel: this is a shutdown signal. we still care about the rest of the queue tho so just ignore and finish up
+                continue;
+            }
             do_send(batch[i]);
         }
     }
