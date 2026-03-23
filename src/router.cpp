@@ -38,7 +38,7 @@ void Router::run_loop() {
                 using T = std::decay_t<decltype(payload)>;
                 if      constexpr (std::is_same_v<T, SubscribeMsg>)   handle_subscribe  (msgs[i].sender_fd, payload);
                 else if constexpr (std::is_same_v<T, UnsubscribeMsg>) handle_unsubscribe(msgs[i].sender_fd, payload);
-                else if constexpr (std::is_same_v<T, PublishMsg>)     handle_publish    (msgs[i].sender_fd, payload);
+                else if constexpr (std::is_same_v<T, PublishMsg>)     handle_publish    (msgs[i].sender_fd, payload, msgs[i].frame.header);
                 else if constexpr (std::is_same_v<T, DisconnectMsg>)  handle_disconnect (msgs[i].sender_fd);
                 // ignore the shutdown message since we want to drain the queue anyway
             }, msgs[i].frame.payload);
@@ -88,22 +88,32 @@ void Router::handle_unsubscribe(const int fd, const UnsubscribeMsg& msg) {
     spdlog::debug("fd={} unsubscribed topic={}", fd, msg.topic);
 }
 
-void Router::handle_publish(const int sender_fd, const PublishMsg& msg) {
+void Router::handle_publish(const int sender_fd, const PublishMsg& msg, const FrameHeader& header) {
     const auto it = topic_subscribers_.find(msg.topic);
-    if (it == topic_subscribers_.end()) return;
+    const size_t subscriber_count = (it != topic_subscribers_.end()) ? it->second.size() : 0;
 
-    // Encode frame once, then enqueue a copy per subscriber with the correct dst_fd
-    OutboundMessage out{};
-    const auto result = encode_publish(out.data, /*seq=*/0, msg.topic, msg.body);
-    if (!result) {
-        return;
+    if (it != topic_subscribers_.end()) {
+        // Encode frame once, then enqueue a copy per subscriber with the correct dst_fd
+        OutboundMessage out{};
+        const auto result = encode_publish(out.data, /*seq=*/0, msg.topic, msg.body);
+        if (result) {
+            out.len = *result;
+            for (const int fd : it->second) {
+                out.dest_fd = fd;
+                outbound_.enqueue(out);
+            }
+        }
     }
-    out.len = *result;
 
-    const size_t subscriber_count = it->second.size();
-    for (const int fd : it->second) {
-        out.dest_fd = fd;
-        outbound_.enqueue(out);
+    const bool no_ack = (static_cast<Flags>(header.flags) & Flags::NO_ACK) != Flags::NONE;
+    if (!no_ack) {
+        OutboundMessage ack{};
+        const auto result = encode_ack(ack.data, /*seq=*/0, header.sequence);
+        if (result) {
+            ack.len     = *result;
+            ack.dest_fd = sender_fd;
+            outbound_.enqueue(ack);
+        }
     }
 
     spdlog::debug("fd={} publish topic={} payload_bytes={} subscribers={}",
