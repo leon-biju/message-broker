@@ -101,6 +101,7 @@ class TcpGateway {
     std::thread sender_thread_;
 
     int epoll_fd_{-1};
+
     int wake_fd_ {-1}; // Shutdown signal for recv loop, unblocks the epoll wait as well
     std::atomic_bool send_loop_running_ { true }; // Shutdown signal for send loop
 
@@ -130,6 +131,10 @@ private:
     // Functions below run on sender thread
     void send_loop();
     void do_send(const OutboundMessage& msg);
+
+    // Synchronous error send on the receiver thread, avoids fd-reuse race that would
+    // occur if we enqueued to outbound_queue_ like everyone else and then immediately closed the fd.
+    void send_error_direct(int fd, ErrorCode code, std::string_view msg) noexcept;
 };
 
 #endif

@@ -32,6 +32,14 @@ static std::string_view parse_error_str(ParseError e) {
     return "Unknown";
 }
 
+static ErrorCode parse_error_to_error_code(const ParseError e) {
+    switch (e) {
+        case ParseError::UnsupportedVersion: return ErrorCode::UNSUPPORTED_VER;
+        case ParseError::PayloadTooLarge:    return ErrorCode::PAYLOAD_TOO_LARGE;
+        default:                             return ErrorCode::INVALID_FRAME;
+    }
+}
+
 TcpGateway::TcpGateway(const GatewayConfig& config,
                        moodycamel::BlockingConcurrentQueue<InboundMessage>&  inbound_queue,
                        moodycamel::BlockingConcurrentQueue<OutboundMessage>& outbound_queue)
@@ -208,8 +216,10 @@ bool TcpGateway::try_dispatch_frames(const int fd) {
                 conn.buf.data() + conn.read_offset, sizeof(FrameHeader));
             const auto result = parse_header(raw);
             if (!result) {
+                const ParseError err = result.error();
                 spdlog::debug("fd={} header parse error: {}, disconnecting",
-                    fd, parse_error_str(result.error()));
+                    fd, parse_error_str(err));
+                send_error_direct(fd, parse_error_to_error_code(err), parse_error_str(err));
                 handle_close(fd);
                 return false;
             }
@@ -227,7 +237,11 @@ bool TcpGateway::try_dispatch_frames(const int fd) {
             if (frame) {
                 inbound_queue_.enqueue({ *frame, fd });
             } else {
-                spdlog::debug("fd={} frame decode error: {}", fd, parse_error_str(frame.error()));
+                const ParseError err = frame.error();
+                spdlog::debug("fd={} frame decode error: {}, disconnecting", fd, parse_error_str(err));
+                send_error_direct(fd, parse_error_to_error_code(err), parse_error_str(err)); //send this first then close
+                handle_close(fd);
+                return false;
             }
 
             conn.read_offset += total;
@@ -274,6 +288,21 @@ void TcpGateway::do_send(const OutboundMessage& msg) { //NOLINT
             // EBADF/EPIPE/ECONNRESET: fd closed by read thread so discard silently
             return;
         }
+        ptr       += static_cast<size_t>(sent);
+        remaining -= static_cast<size_t>(sent);
+    }
+}
+
+void TcpGateway::send_error_direct(const int fd, const ErrorCode code, const std::string_view msg) noexcept {
+    std::array<std::byte, sizeof(FrameHeader) + sizeof(ErrorCode) + sizeof(uint16_t) + 256> buf{};
+    const auto result = encode_error(buf, /*seq=*/0, code, msg);
+    if (!result) return;
+
+    const std::byte* ptr = buf.data();
+    size_t remaining     = *result;
+    while (remaining > 0) {
+        const ssize_t sent = send(fd, ptr, remaining, MSG_NOSIGNAL);
+        if (sent <= 0) return;
         ptr       += static_cast<size_t>(sent);
         remaining -= static_cast<size_t>(sent);
     }
