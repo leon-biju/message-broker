@@ -29,7 +29,7 @@ struct StringHash {
 };
 
 struct RouterConfig {
-    moodycamel::ConcurrentQueue<InboundMessage>&          inbound;
+    moodycamel::BlockingConcurrentQueue<InboundMessage>&  inbound;
     moodycamel::BlockingConcurrentQueue<OutboundMessage>& outbound;
     int pinned_cpu_core;    // -1 to disable pinning like gateway?
 };
@@ -43,7 +43,7 @@ class Router {
         int,
         std::unordered_map<std::string, size_t, StringHash, std::equal_to<>>
     > fd_topic_slot_;
-    moodycamel::ConcurrentQueue<InboundMessage>&          inbound_;
+    moodycamel::BlockingConcurrentQueue<InboundMessage>&  inbound_;
     moodycamel::BlockingConcurrentQueue<OutboundMessage>& outbound_;
 
     std::atomic_bool shutdown_ {false};
@@ -51,7 +51,7 @@ class Router {
     std::thread worker_;
     int         pinned_cpu_core_;
 public:
-    explicit Router(const RouterConfig cfg)
+    explicit Router(const RouterConfig& cfg)
         : inbound_(cfg.inbound), outbound_(cfg.outbound), pinned_cpu_core_(cfg.pinned_cpu_core) {};
     void start();
     void stop();

@@ -33,7 +33,7 @@ static std::string_view parse_error_str(ParseError e) {
 }
 
 TcpGateway::TcpGateway(const GatewayConfig& config,
-                       moodycamel::ConcurrentQueue<InboundMessage>&          inbound_queue,
+                       moodycamel::BlockingConcurrentQueue<InboundMessage>&  inbound_queue,
                        moodycamel::BlockingConcurrentQueue<OutboundMessage>& outbound_queue)
     : config_(config)
     , listening_socket_(ListeningSocket(config.port))
@@ -70,8 +70,8 @@ TcpGateway::TcpGateway(const GatewayConfig& config,
 
 TcpGateway::~TcpGateway() {
     stop();
-    if (wake_fd_ >= 0) close(wake_fd_);
-    if (epoll_fd_ >= 0)    close(epoll_fd_);
+    if (wake_fd_ >= 0)  close(wake_fd_);
+    if (epoll_fd_ >= 0) close(epoll_fd_);
 }
 
 void TcpGateway::start() {
@@ -246,11 +246,10 @@ bool TcpGateway::try_dispatch_frames(const int fd) {
 
 void TcpGateway::send_loop() {
     static constexpr size_t BATCH   = 32;
-    static constexpr auto   TIMEOUT = std::chrono::milliseconds(1);
 
     OutboundMessage batch[BATCH];
     while (send_loop_running_.load(std::memory_order_relaxed)) {
-        const size_t n = outbound_queue_.wait_dequeue_bulk_timed(batch, BATCH, TIMEOUT);
+        const size_t n = outbound_queue_.wait_dequeue_bulk(batch, BATCH);
         for (size_t i = 0; i < n; ++i)
             do_send(batch[i]);
     }

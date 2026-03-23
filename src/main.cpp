@@ -25,7 +25,7 @@ int main() {
     spdlog::set_level(spdlog::level::debug);
     spdlog::set_pattern("[%H:%M:%S.%e] [%^%l%$] [%t] %v");
 
-    moodycamel::ConcurrentQueue<InboundMessage>          inbound_queue;
+    moodycamel::BlockingConcurrentQueue<InboundMessage>  inbound_queue;
     moodycamel::BlockingConcurrentQueue<OutboundMessage> outbound_queue;
     Router router(RouterConfig { inbound_queue, outbound_queue, 2 });
 
@@ -44,7 +44,7 @@ int main() {
     gateway.start();
 
     while (g_running) {
-        std::this_thread::yield();
+        pause(); // I mean, it's not urgent is it
     }
 
     spdlog::info("Shutting down...");

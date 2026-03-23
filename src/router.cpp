@@ -29,11 +29,8 @@ void Router::run_loop() {
 
     InboundMessage msgs[BATCH_SIZE];
     while (!shutdown_.load(std::memory_order_relaxed)) {
-        const size_t n = inbound_.try_dequeue_bulk(msgs, BATCH_SIZE);
-        if (n == 0) {
-            std::this_thread::yield();
-            continue;
-        }
+        const size_t n = inbound_.wait_dequeue_bulk(msgs, BATCH_SIZE);
+
         for (size_t i = 0; i < n; ++i) {
             std::visit([&](auto& payload) {
                 using T = std::decay_t<decltype(payload)>;

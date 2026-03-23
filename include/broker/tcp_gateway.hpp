@@ -91,7 +91,7 @@ class TcpGateway {
     ListeningSocket listening_socket_;
 
     // Queues used to collect messages coming in and send messages out
-    moodycamel::ConcurrentQueue<InboundMessage>&          inbound_queue_;
+    moodycamel::BlockingConcurrentQueue<InboundMessage>&  inbound_queue_;
     moodycamel::BlockingConcurrentQueue<OutboundMessage>& outbound_queue_;
 
     std::vector<ConnMeta> connection_metadata_;
@@ -106,7 +106,7 @@ class TcpGateway {
 
 public:
     TcpGateway(const GatewayConfig& config,
-               moodycamel::ConcurrentQueue<InboundMessage>&          inbound_queue,
+               moodycamel::BlockingConcurrentQueue<InboundMessage>&  inbound_queue,
                moodycamel::BlockingConcurrentQueue<OutboundMessage>& outbound_queue);
     ~TcpGateway();
     TcpGateway(const TcpGateway&)            = delete;
