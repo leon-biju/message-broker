@@ -3,6 +3,8 @@
 #include <pthread.h>
 #include <thread>
 
+#include <spdlog/spdlog.h>
+
 #include <broker/router.hpp>
 
 static constexpr size_t BATCH_SIZE = 64;
@@ -52,6 +54,8 @@ void Router::handle_subscribe(const int fd, const SubscribeMsg& msg) {
     auto& subs = topic_subscribers_[std::string(msg.topic)];  // creates vec if absent
     subscribed_map.emplace(msg.topic, subs.size());
     subs.push_back(fd);
+
+    spdlog::debug("fd={} subscribed topic={}", fd, msg.topic);
 }
 
 void Router::handle_unsubscribe(const int fd, const UnsubscribeMsg& msg) {
@@ -80,9 +84,11 @@ void Router::handle_unsubscribe(const int fd, const UnsubscribeMsg& msg) {
     if (subs.empty()) {
         topic_subscribers_.erase(topic_it);
     }
+
+    spdlog::debug("fd={} unsubscribed topic={}", fd, msg.topic);
 }
 
-void Router::handle_publish(const int /*sender_fd*/, const PublishMsg& msg) {
+void Router::handle_publish(const int sender_fd, const PublishMsg& msg) {
     const auto it = topic_subscribers_.find(msg.topic);
     if (it == topic_subscribers_.end()) return;
 
@@ -94,15 +100,21 @@ void Router::handle_publish(const int /*sender_fd*/, const PublishMsg& msg) {
     }
     out.len = *result;
 
+    const size_t subscriber_count = it->second.size();
     for (const int fd : it->second) {
         out.dest_fd = fd;
         outbound_.enqueue(out);
     }
+
+    spdlog::debug("fd={} publish topic={} payload_bytes={} subscribers={}",
+        sender_fd, msg.topic, msg.body.size(), subscriber_count);
 }
 
 void Router::handle_disconnect(const int fd) {
     const auto fd_it = fd_topic_slot_.find(fd);
     if (fd_it == fd_topic_slot_.end()) return;
+
+    const size_t topic_count = fd_it->second.size();
 
     for (auto& [topic, slot] : fd_it->second) {
         const auto topic_it = topic_subscribers_.find(topic);
@@ -123,4 +135,6 @@ void Router::handle_disconnect(const int fd) {
     }
 
     fd_topic_slot_.erase(fd_it);
+
+    spdlog::debug("fd={} disconnected, removed from {} topics", fd, topic_count);
 }

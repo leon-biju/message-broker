@@ -32,6 +32,7 @@ target_include_directories(broker_lib PUBLIC include) #Including headers as well
 #Remember to link crucial non bench/test only 3rd party libraries here
 target_link_libraries(broker_lib PUBLIC
     concurrentqueue
+    spdlog::spdlog
 )
 
 # Main executable

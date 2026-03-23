@@ -5,18 +5,32 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
-#include <print>
 #include <pthread.h>
 #include <sys/eventfd.h>
 #include <arpa/inet.h>
 #include <sys/epoll.h>
 #include <sys/resource.h>
 #include <netinet/tcp.h>
+#include <netinet/in.h>
+
+#include <spdlog/spdlog.h>
 
 #include <broker/tcp_gateway.hpp>
 
 static constexpr int    MAX_EPOLL_EVENTS   = 64;
 static constexpr size_t COMPACT_THRESHOLD  = READ_BUF_SIZE / 2;
+
+static std::string_view parse_error_str(ParseError e) {
+    switch (e) {
+        case ParseError::BadMagic:           return "BadMagic";
+        case ParseError::UnsupportedVersion: return "UnsupportedVersion";
+        case ParseError::UnknownMessageType: return "UnknownMessageType";
+        case ParseError::UnknownFlags:       return "UnknownFlags";
+        case ParseError::PayloadTooLarge:    return "PayloadTooLarge";
+        case ParseError::BufferTooSmall:     return "BufferTooSmall";
+    }
+    return "Unknown";
+}
 
 TcpGateway::TcpGateway(const GatewayConfig& config,
                        moodycamel::ConcurrentQueue<InboundMessage>&          inbound_queue,
@@ -50,6 +64,8 @@ TcpGateway::TcpGateway(const GatewayConfig& config,
 
     ev.data.fd = wake_fd_;
     epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, wake_fd_, &ev);
+
+    spdlog::info("tcp gateway listening on port={}", config.port);
 }
 
 TcpGateway::~TcpGateway() {
@@ -87,8 +103,9 @@ void TcpGateway::recv_loop() {
     while (true) {
         const int n = epoll_wait(epoll_fd_, events.data(), MAX_EPOLL_EVENTS, -1);
         if (n < 0) {
-            if (errno != EINTR) break;
-            continue;
+            if (errno == EINTR) continue;
+            spdlog::error("epoll_wait failed: {}", strerror(errno));
+            break;
         }
         for (int i = 0; i < n; ++i) {
             const int fd = events[i].data.fd;
@@ -100,6 +117,7 @@ void TcpGateway::recv_loop() {
                 handle_accept();
             } else {
                 if (events[i].events & (EPOLLHUP | EPOLLERR)) {
+                    spdlog::info("fd={} epoll HUP/ERR, disconnecting", fd);
                     handle_close(fd);
                 } else {
                     handle_read(fd);
@@ -111,14 +129,20 @@ void TcpGateway::recv_loop() {
 
 void TcpGateway::handle_accept() {
     while (true) {
-        const int client_fd = accept4(listening_socket_.fd(), nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
+        sockaddr_in addr{};
+        socklen_t addrlen = sizeof(addr);
+        const int client_fd = accept4(listening_socket_.fd(),
+                                      reinterpret_cast<sockaddr*>(&addr), &addrlen,
+                                      SOCK_NONBLOCK | SOCK_CLOEXEC);
         if (client_fd < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-            std::println(stderr, "accept4 error: {}", strerror(errno));
+            spdlog::error("accept4 failed: {}", strerror(errno));
             break;
         }
 
         if (active_connections_count_ >= config_.max_connections) {
+            spdlog::warn("max connections reached ({}/{}), rejecting fd={}",
+                active_connections_count_, config_.max_connections, client_fd);
             close(client_fd);
             continue;
         }
@@ -134,6 +158,10 @@ void TcpGateway::handle_accept() {
         ev.events  = EPOLLIN | EPOLLET;
         ev.data.fd = client_fd;
         epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, client_fd, &ev);
+
+        char ip_buf[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &addr.sin_addr, ip_buf, sizeof(ip_buf));
+        spdlog::info("client connected fd={} addr={}:{}", client_fd, ip_buf, ntohs(addr.sin_port));
     }
 }
 
@@ -142,6 +170,7 @@ void TcpGateway::handle_read(const int fd) {
     while (true) {
         const size_t space = conn.buf.size() - conn.bytes_in_buf;
         if (space == 0) {
+            spdlog::info("fd={} recv buffer full, disconnecting", fd);
             handle_close(fd);
             return;
         }
@@ -149,10 +178,12 @@ void TcpGateway::handle_read(const int fd) {
         const ssize_t n = recv(fd, conn.buf.data() + conn.bytes_in_buf, space, 0);
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            spdlog::info("fd={} recv error: {}, disconnecting", fd, strerror(errno));
             handle_close(fd);
             return;
         }
         if (n == 0) {
+            spdlog::info("fd={} EOF, disconnecting", fd);
             handle_close(fd);
             return;
         }
@@ -174,6 +205,8 @@ bool TcpGateway::try_dispatch_frames(const int fd) {
                 conn.buf.data() + conn.read_offset, sizeof(FrameHeader));
             const auto result = parse_header(raw);
             if (!result) {
+                spdlog::debug("fd={} header parse error: {}, disconnecting",
+                    fd, parse_error_str(result.error()));
                 handle_close(fd);
                 return false;
             }
@@ -187,8 +220,12 @@ bool TcpGateway::try_dispatch_frames(const int fd) {
 
             auto payload = std::span(conn.buf.data() + conn.read_offset + sizeof(FrameHeader),
                                      conn.cached_header.payload_len);
-            if (auto frame = decode_frame(conn.cached_header, payload))
+            auto frame = decode_frame(conn.cached_header, payload);
+            if (frame) {
                 inbound_queue_.enqueue({ *frame, fd });
+            } else {
+                spdlog::debug("fd={} frame decode error: {}", fd, parse_error_str(frame.error()));
+            }
 
             conn.read_offset += total;
             conn.stage = ParseStage::AwaitingHeader;
@@ -196,6 +233,7 @@ bool TcpGateway::try_dispatch_frames(const int fd) {
             // Compact only when the dead prefix exceeds the threshold
             if (conn.read_offset >= COMPACT_THRESHOLD) {
                 const size_t remaining = conn.bytes_in_buf - conn.read_offset;
+                spdlog::debug("fd={} compacting buffer remaining={}", fd, remaining);
                 if (remaining > 0)
                     std::memmove(conn.buf.data(), conn.buf.data() + conn.read_offset, remaining);
                 conn.bytes_in_buf = remaining;

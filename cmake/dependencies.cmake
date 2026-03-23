@@ -14,11 +14,16 @@ FetchContent_Declare(google_benchmark
     GIT_REPOSITORY https://github.com/google/benchmark.git
     GIT_TAG        v1.9.5)
 
+FetchContent_Declare(spdlog
+    GIT_REPOSITORY https://github.com/gabime/spdlog.git
+    GIT_TAG        v1.15.3)
+
 
 FetchContent_MakeAvailable(
         concurrent_queue
         google_test
         google_benchmark
+        spdlog
 )
 
 get_directory_property(_targets BUILDSYSTEM_TARGETS)
