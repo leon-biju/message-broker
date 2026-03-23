@@ -1,9 +1,4 @@
-/*************************** router.cpp ***************************
-* Responsible for the following:
-*     - Sole consumer of the inbound queue
-*     - Exclusively owns the topic -> vector<subscriber fd> map
-*     - Routes each inbound message to the appropriate handler
-*/
+/*************************** router.cpp ***************************/
 
 #include <pthread.h>
 #include <thread>
@@ -87,10 +82,22 @@ void Router::handle_unsubscribe(const int fd, const UnsubscribeMsg& msg) {
     }
 }
 
-void Router::handle_publish(const int fd, const PublishMsg& msg) {
-    // TODO: encode frame once and enqueue OutboundMessage per subscriber
-    (void)fd;
-    (void)msg;
+void Router::handle_publish(const int /*sender_fd*/, const PublishMsg& msg) {
+    const auto it = topic_subscribers_.find(msg.topic);
+    if (it == topic_subscribers_.end()) return;
+
+    // Encode frame once, then enqueue a copy per subscriber with the correct dst_fd
+    OutboundMessage out{};
+    const auto result = encode_publish(out.data, /*seq=*/0, msg.topic, msg.body);
+    if (!result) {
+        return;
+    }
+    out.len = *result;
+
+    for (const int fd : it->second) {
+        out.dest_fd = fd;
+        outbound_.enqueue(out);
+    }
 }
 
 void Router::handle_disconnect(const int fd) {
@@ -99,7 +106,9 @@ void Router::handle_disconnect(const int fd) {
 
     for (auto& [topic, slot] : fd_it->second) {
         const auto topic_it = topic_subscribers_.find(topic);
-        if (topic_it == topic_subscribers_.end()) continue;
+        if (topic_it == topic_subscribers_.end()) {
+            continue;
+        }
 
         auto& subs = topic_it->second;
         std::swap(subs[slot], subs.back());
