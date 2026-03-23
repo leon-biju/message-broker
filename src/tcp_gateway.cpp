@@ -84,10 +84,13 @@ void TcpGateway::stop() {
         const uint64_t val = 1;
         write(wake_fd_, &val, sizeof(val));
         receiver_thread_.join();
+        spdlog::debug("Receiver thread on tcpgateway joined!");
     }
     if (sender_thread_.joinable()) {
         send_loop_running_.store(false, std::memory_order_relaxed);
+        outbound_queue_.enqueue(OutboundMessage{ .dest_fd = -1 }); // sentinel: unblocks wait_dequeue_bulk
         sender_thread_.join();
+        spdlog::debug("Sender thread on tcpgateway joined!");
     }
 }
 
@@ -250,13 +253,11 @@ void TcpGateway::send_loop() {
     OutboundMessage batch[BATCH];
     while (send_loop_running_.load(std::memory_order_relaxed)) {
         const size_t n = outbound_queue_.wait_dequeue_bulk(batch, BATCH);
-        for (size_t i = 0; i < n; ++i)
+        for (size_t i = 0; i < n; ++i) {
+            if (batch[i].dest_fd == -1) return; // sentinel: exit mid-batch, recv thread already stopped so nothing follows, todo: note-- maybe we do care about the leftovers in the queue?
             do_send(batch[i]);
+        }
     }
-    // Drain items that raced in after the flag was set
-    OutboundMessage msg; //NOLINT
-    while (outbound_queue_.try_dequeue(msg))
-        do_send(msg);
 }
 
 void TcpGateway::do_send(const OutboundMessage& msg) { //NOLINT

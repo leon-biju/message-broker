@@ -148,9 +148,12 @@ struct ErrorMsg {
 // Not an actual message that we can receive, but if a client disconnects then this gets pushed onto the inbound queue
 struct DisconnectMsg {};
 
+// Another non-message message, enqueued by Router::stop() to unblock wait_dequeue_bulk on the inbound queue
+struct ShutdownMsg {};
+
 struct DecodedFrame {
     FrameHeader header;
-    std::variant<SubscribeMsg, UnsubscribeMsg, PublishMsg, AckMsg, ErrorMsg, DisconnectMsg> payload;
+    std::variant<SubscribeMsg, UnsubscribeMsg, PublishMsg, AckMsg, ErrorMsg, DisconnectMsg, ShutdownMsg> payload;
 };
 
 
