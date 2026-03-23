@@ -3,6 +3,7 @@
 */
 
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <print>
 #include <pthread.h>
@@ -17,16 +18,19 @@
 static constexpr int    MAX_EPOLL_EVENTS   = 64;
 static constexpr size_t COMPACT_THRESHOLD  = READ_BUF_SIZE / 2;
 
-TcpGateway::TcpGateway(const GatewayConfig& config, moodycamel::ConcurrentQueue<InboundMessage>& queue)
+TcpGateway::TcpGateway(const GatewayConfig& config,
+                       moodycamel::ConcurrentQueue<InboundMessage>&          inbound_queue,
+                       moodycamel::BlockingConcurrentQueue<OutboundMessage>& outbound_queue)
     : config_(config)
     , listening_socket_(ListeningSocket(config.port))
-    , inbound_queue_(queue)
+    , inbound_queue_(inbound_queue)
+    , outbound_queue_(outbound_queue)
 {
     epoll_fd_ = epoll_create1(EPOLL_CLOEXEC);
     if (epoll_fd_ < 0) throw std::runtime_error("epoll_create1 failed");
 
-    shutdown_fd_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-    if (shutdown_fd_ < 0) {
+    wake_fd_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    if (wake_fd_ < 0) {
         close(epoll_fd_);
         throw std::runtime_error("eventfd failed");
     }
@@ -37,35 +41,41 @@ TcpGateway::TcpGateway(const GatewayConfig& config, moodycamel::ConcurrentQueue<
     };
     setrlimit(RLIMIT_NOFILE, &rl);
 
-    meta_.resize(config.fd_table_size);
+    connection_metadata_.resize(config.fd_table_size); // use resize() so it zeros all the slots as well
 
     epoll_event ev{};
     ev.events  = EPOLLIN | EPOLLET;
     ev.data.fd = listening_socket_.fd();
     epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, listening_socket_.fd(), &ev);
 
-    ev.data.fd = shutdown_fd_;
-    epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, shutdown_fd_, &ev);
+    ev.data.fd = wake_fd_;
+    epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, wake_fd_, &ev);
 }
 
 TcpGateway::~TcpGateway() {
     stop();
-    if (shutdown_fd_ >= 0) close(shutdown_fd_);
+    if (wake_fd_ >= 0) close(wake_fd_);
     if (epoll_fd_ >= 0)    close(epoll_fd_);
 }
 
 void TcpGateway::start() {
-    worker_ = std::thread([this] { run_loop(); });
+    receiver_thread_ = std::thread([this] { recv_loop(); });
+    sender_thread_ = std::thread([this] { send_loop(); });
 }
 
 void TcpGateway::stop() {
-    if (!worker_.joinable()) return;
-    const uint64_t val = 1;
-    write(shutdown_fd_, &val, sizeof(val));
-    worker_.join();
+    if (receiver_thread_.joinable()) {
+        const uint64_t val = 1;
+        write(wake_fd_, &val, sizeof(val));
+        receiver_thread_.join();
+    }
+    if (sender_thread_.joinable()) {
+        send_loop_running_.store(false, std::memory_order_relaxed);
+        sender_thread_.join();
+    }
 }
 
-void TcpGateway::run_loop() {
+void TcpGateway::recv_loop() {
     if (config_.pinned_cpu_core >= 0) {
         cpu_set_t cpus{};
         CPU_ZERO(&cpus);
@@ -82,8 +92,10 @@ void TcpGateway::run_loop() {
         }
         for (int i = 0; i < n; ++i) {
             const int fd = events[i].data.fd;
-            if (fd == shutdown_fd_) return;
-
+            if (fd == wake_fd_) {
+                // shutdown signal, bye!
+                return;
+            }
             if (fd == listening_socket_.fd()) {
                 handle_accept();
             } else {
@@ -106,7 +118,7 @@ void TcpGateway::handle_accept() {
             break;
         }
 
-        if (active_count_ >= config_.max_connections) {
+        if (active_connections_count_ >= config_.max_connections) {
             close(client_fd);
             continue;
         }
@@ -114,9 +126,9 @@ void TcpGateway::handle_accept() {
         const int nodelay = 1;
         setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
-        meta_[client_fd] = ConnMeta{};
-        meta_[client_fd].active = true;
-        ++active_count_;
+        connection_metadata_[client_fd] = ConnMeta{};
+        connection_metadata_[client_fd].active = true;
+        ++active_connections_count_;
 
         epoll_event ev{};
         ev.events  = EPOLLIN | EPOLLET;
@@ -126,7 +138,7 @@ void TcpGateway::handle_accept() {
 }
 
 void TcpGateway::handle_read(const int fd) {
-    ConnMeta& conn = meta_[fd];
+    ConnMeta& conn = connection_metadata_[fd];
     while (true) {
         const size_t space = conn.buf.size() - conn.bytes_in_buf;
         if (space == 0) {
@@ -151,7 +163,7 @@ void TcpGateway::handle_read(const int fd) {
 }
 
 bool TcpGateway::try_dispatch_frames(const int fd) {
-    ConnMeta& conn = meta_[fd];
+    ConnMeta& conn = connection_metadata_[fd];
     while (true) {
         const size_t available = conn.bytes_in_buf - conn.read_offset;
 
@@ -194,10 +206,40 @@ bool TcpGateway::try_dispatch_frames(const int fd) {
     return true;
 }
 
+void TcpGateway::send_loop() {
+    static constexpr size_t BATCH   = 32;
+    static constexpr auto   TIMEOUT = std::chrono::milliseconds(1);
+
+    OutboundMessage batch[BATCH];
+    while (send_loop_running_.load(std::memory_order_relaxed)) {
+        const size_t n = outbound_queue_.wait_dequeue_bulk_timed(batch, BATCH, TIMEOUT);
+        for (size_t i = 0; i < n; ++i)
+            do_send(batch[i]);
+    }
+    // Drain items that raced in after the flag was set
+    OutboundMessage msg; //NOLINT
+    while (outbound_queue_.try_dequeue(msg))
+        do_send(msg);
+}
+
+void TcpGateway::do_send(const OutboundMessage& msg) { //NOLINT
+    const std::byte* ptr = msg.data.data();
+    size_t remaining     = msg.len;
+    while (remaining > 0) {
+        const ssize_t sent = send(msg.dest_fd, ptr, remaining, MSG_NOSIGNAL);
+        if (sent < 0) {
+            // EAGAIN: kernel send buffer full we will drop for now (post-MVP: buffer remainder)
+            // EBADF/EPIPE/ECONNRESET: fd closed by read thread so discard silently
+            return;
+        }
+        ptr       += static_cast<size_t>(sent);
+        remaining -= static_cast<size_t>(sent);
+    }
+}
+
 void TcpGateway::handle_close(const int fd) {
 
     // Enqueuing this message ensures the router will remove this fd from all future rounds
-    // treated like an unsubscribe from all topics
     inbound_queue_.enqueue(InboundMessage {
         .frame = DecodedFrame {
             .header = {},
@@ -207,7 +249,7 @@ void TcpGateway::handle_close(const int fd) {
     });
 
     epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
-    meta_[fd].active = false;
-    --active_count_;
+    connection_metadata_[fd].active = false;
+    --active_connections_count_;
     close(fd);
 }

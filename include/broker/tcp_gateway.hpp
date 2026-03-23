@@ -2,13 +2,13 @@
 #define INCLUDE_BROKER_TCP_GATEWAY_HPP_
 
 /*************************** tcp_gateway.hpp ***************************
- * This file contains the main TcpGateway class, it's main responsibility is to listen
- * and place all decoded messages into a queue to be dealt with by owner of TcpGateway
+ * This file contains the main TcpGateway class. It's responsibilities are twofold:
+ *     - Listen to messages decode them and put them on the inbound queue
+ *     - Send messages on the outbound queue
  */
 
 #include <array>
 #include <cstddef>
-#include <print>
 #include <stdexcept>
 #include <thread>
 #include <unistd.h>
@@ -16,11 +16,12 @@
 #include <netinet/in.h>
 
 #include <concurrentqueue.h>
+#include <blockingconcurrentqueue.h>
 #include <broker/protocol.hpp>
 
 inline constexpr size_t READ_BUF_SIZE = sizeof(FrameHeader) + MAX_PAYLOAD_LEN;
 
-// Lightweight RAII wrapper for listening socket
+// Lightweight RAII wrapper for listening socket, probably don't need this tbh, might remove in later versions
 class ListeningSocket {
     int fd_;
 public:
@@ -44,7 +45,6 @@ public:
             close(fd_);
             throw std::runtime_error("listen() failed");
         }
-        std::println("Constructed and listening on fd {}", fd_);
     }
     ListeningSocket(const ListeningSocket&)            = delete;
     ListeningSocket& operator=(const ListeningSocket&) = delete;
@@ -57,7 +57,7 @@ public:
 // Configuration settings for the TcpGateway class
 struct GatewayConfig {
     uint32_t max_connections;    // actual client cap
-    uint32_t fd_table_size;      // rlimit + meta_ vector size
+    uint32_t fd_table_size;      // rlimit + connection_metadata_ vector size
     uint16_t port;
     int      pinned_cpu_core;    // -1 to disable pinning
 };
@@ -79,19 +79,35 @@ struct ConnMeta {
 // Decoded Message + sender fd
 struct InboundMessage { DecodedFrame frame; int sender_fd; }; // NOLINT
 
+// Pre-encoded frame + destination fd. Zero-allocation: router encodes into a local instance and enqueues by value.
+struct OutboundMessage {
+    std::array<std::byte, READ_BUF_SIZE> data; // pre-encoded wire frame, this is also very bad and disgusting
+    size_t  len;    // how many bytes to actually send [0..len)
+    int     dest_fd; // destination client socket
+};
+
 class TcpGateway {
     GatewayConfig   config_;
     ListeningSocket listening_socket_;
-    int             epoll_fd_    { -1 };
-    int             shutdown_fd_ { -1 }; // used so that epoll_wait is unblocked then checked in run_loop()
 
-    moodycamel::ConcurrentQueue<InboundMessage>& inbound_queue_;
-    std::vector<ConnMeta> meta_;
-    size_t                active_count_ { 0 };
-    std::thread   worker_;
+    // Queues used to collect messages coming in and send messages out
+    moodycamel::ConcurrentQueue<InboundMessage>&          inbound_queue_;
+    moodycamel::BlockingConcurrentQueue<OutboundMessage>& outbound_queue_;
+
+    std::vector<ConnMeta> connection_metadata_;
+    size_t                active_connections_count_ {0};
+
+    std::thread receiver_thread_;
+    std::thread sender_thread_;
+
+    int epoll_fd_{-1};
+    int wake_fd_ {-1}; // Shutdown signal for recv loop, unblocks the epoll wait as well
+    std::atomic_bool send_loop_running_ { false }; // Shutdown signal for send loop
 
 public:
-    TcpGateway(const GatewayConfig& config, moodycamel::ConcurrentQueue<InboundMessage>& queue);
+    TcpGateway(const GatewayConfig& config,
+               moodycamel::ConcurrentQueue<InboundMessage>&          inbound_queue,
+               moodycamel::BlockingConcurrentQueue<OutboundMessage>& outbound_queue);
     ~TcpGateway();
     TcpGateway(const TcpGateway&)            = delete;
     TcpGateway& operator=(const TcpGateway&) = delete;
@@ -104,12 +120,16 @@ public:
 
 private:
 
-    // Functions below are run on an independent thread separate from the public api
-    void run_loop();
+    // Functions below are run on receiver thread
+    void recv_loop();
     void handle_accept();
     void handle_read(int fd);
     void handle_close(int fd);
     bool try_dispatch_frames(int fd);
+
+    // Functions below run on sender thread
+    void send_loop();
+    void do_send(const OutboundMessage& msg);
 };
 
 #endif
