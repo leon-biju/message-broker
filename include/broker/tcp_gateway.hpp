@@ -102,7 +102,7 @@ class TcpGateway {
 
     int epoll_fd_{-1};
     int wake_fd_ {-1}; // Shutdown signal for recv loop, unblocks the epoll wait as well
-    std::atomic_bool send_loop_running_ { false }; // Shutdown signal for send loop
+    std::atomic_bool send_loop_running_ { true }; // Shutdown signal for send loop
 
 public:
     TcpGateway(const GatewayConfig& config,
