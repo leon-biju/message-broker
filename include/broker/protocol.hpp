@@ -64,6 +64,9 @@ constexpr Flags operator|(Flags lhs, Flags rhs) {
 constexpr Flags operator&(Flags lhs, Flags rhs) {
     return static_cast<Flags>(static_cast<uint8_t>(lhs) & static_cast<uint8_t>(rhs));
 }
+constexpr bool has_flag(uint8_t raw_flags, Flags flag) {
+    return (static_cast<Flags>(raw_flags) & flag) != Flags::NONE;
+}
 
 enum class ErrorCode : uint16_t {
     OK                = 0,
