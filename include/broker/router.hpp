@@ -55,11 +55,13 @@ public:
 
 private:
     void run_loop();
-    void handle_subscribe  (int fd, const SubscribeMsg&   msg);
-    void handle_unsubscribe(int fd, const UnsubscribeMsg& msg);
+    void handle_subscribe  (int fd, const SubscribeMsg&   msg, const FrameHeader& header);
+    void handle_unsubscribe(int fd, const UnsubscribeMsg& msg, const FrameHeader& header);
     void handle_publish    (int fd, const PublishMsg& msg, const FrameHeader& header);
     void handle_disconnect (int fd);
 
+    //Helper to send ACK messages
+    void enqueue_ack(int fd, uint64_t acked_seq);
 };
 
 

@@ -36,8 +36,8 @@ void Router::run_loop() {
         for (size_t i = 0; i < n; ++i) {
             std::visit([&](auto& payload) {
                 using T = std::decay_t<decltype(payload)>;
-                if      constexpr (std::is_same_v<T, SubscribeMsg>)   handle_subscribe  (msgs[i].sender_fd, payload);
-                else if constexpr (std::is_same_v<T, UnsubscribeMsg>) handle_unsubscribe(msgs[i].sender_fd, payload);
+                if      constexpr (std::is_same_v<T, SubscribeMsg>)   handle_subscribe  (msgs[i].sender_fd, payload, msgs[i].frame.header);
+                else if constexpr (std::is_same_v<T, UnsubscribeMsg>) handle_unsubscribe(msgs[i].sender_fd, payload, msgs[i].frame.header);
                 else if constexpr (std::is_same_v<T, PublishMsg>)     handle_publish    (msgs[i].sender_fd, payload, msgs[i].frame.header);
                 else if constexpr (std::is_same_v<T, DisconnectMsg>)  handle_disconnect (msgs[i].sender_fd);
                 // ignore the shutdown message since we want to drain the queue anyway
@@ -46,46 +46,51 @@ void Router::run_loop() {
     }
 }
 
-void Router::handle_subscribe(const int fd, const SubscribeMsg& msg) {
+void Router::handle_subscribe(const int fd, const SubscribeMsg& msg, const FrameHeader& header) {
     auto& subscribed_map = fd_topic_slot_[fd];  // creates entry if absent
 
-    if (subscribed_map.contains(msg.topic)) return;  // already subscribed
+    if (!subscribed_map.contains(msg.topic)) {
+        auto& subs = topic_subscribers_[std::string(msg.topic)];  // creates vec if absent
+        subscribed_map.emplace(msg.topic, subs.size());
+        subs.push_back(fd);
+        spdlog::debug("fd={} subscribed topic={}", fd, msg.topic);
+    }
 
-    auto& subs = topic_subscribers_[std::string(msg.topic)];  // creates vec if absent
-    subscribed_map.emplace(msg.topic, subs.size());
-    subs.push_back(fd);
-
-    spdlog::debug("fd={} subscribed topic={}", fd, msg.topic);
+    if (!has_flag(header.flags, Flags::NO_ACK)) {
+        enqueue_ack(fd, header.sequence);
+    }
 }
 
-void Router::handle_unsubscribe(const int fd, const UnsubscribeMsg& msg) {
+void Router::handle_unsubscribe(const int fd, const UnsubscribeMsg& msg, const FrameHeader& header) {
     const auto fd_it = fd_topic_slot_.find(fd);
-    if (fd_it == fd_topic_slot_.end()) return;
+    if (fd_it != fd_topic_slot_.end()) {
+        auto& subscribed_map = fd_it->second;
+        const auto slot_it = subscribed_map.find(msg.topic);
+        if (slot_it != subscribed_map.end()) {
+            const size_t slot = slot_it->second;
+            subscribed_map.erase(slot_it);
 
-    auto& subscribed_map = fd_it->second;
-    const auto slot_it = subscribed_map.find(msg.topic);
-    if (slot_it == subscribed_map.end()) return;  // not subscribed to this topic
+            const auto topic_it = topic_subscribers_.find(msg.topic);
+            if (topic_it != topic_subscribers_.end()) {
+                auto& subs = topic_it->second;
+                std::swap(subs[slot], subs.back());
+                subs.pop_back();
 
-    const size_t slot = slot_it->second;
-    subscribed_map.erase(slot_it);
+                // If the swap moved a different fd into `slot`, update its reverse-index entry
+                if (slot < subs.size()) {
+                    fd_topic_slot_[subs[slot]][std::string(msg.topic)] = slot;
+                }
 
-    const auto topic_it = topic_subscribers_.find(msg.topic);
-    if (topic_it == topic_subscribers_.end()) return;
-
-    auto& subs = topic_it->second;
-    std::swap(subs[slot], subs.back());
-    subs.pop_back();
-
-    // If the swap moved a different fd into `slot`, update its reverse-index entry
-    if (slot < subs.size()) {
-        fd_topic_slot_[subs[slot]][std::string(msg.topic)] = slot;
+                if (subs.empty()) {
+                    topic_subscribers_.erase(topic_it);
+                }
+            }
+            spdlog::debug("fd={} unsubscribed topic={}", fd, msg.topic);
+        }
     }
 
-    if (subs.empty()) {
-        topic_subscribers_.erase(topic_it);
-    }
-
-    spdlog::debug("fd={} unsubscribed topic={}", fd, msg.topic);
+    if (!has_flag(header.flags, Flags::NO_ACK))
+        enqueue_ack(fd, header.sequence);
 }
 
 void Router::handle_publish(const int sender_fd, const PublishMsg& msg, const FrameHeader& header) {
@@ -105,15 +110,8 @@ void Router::handle_publish(const int sender_fd, const PublishMsg& msg, const Fr
         }
     }
 
-    const bool no_ack = (static_cast<Flags>(header.flags) & Flags::NO_ACK) != Flags::NONE;
-    if (!no_ack) {
-        OutboundMessage ack{};
-        const auto result = encode_ack(ack.data, /*seq=*/0, header.sequence);
-        if (result) {
-            ack.len     = *result;
-            ack.dest_fd = sender_fd;
-            outbound_.enqueue(ack);
-        }
+    if (!has_flag(header.flags, Flags::NO_ACK)) {
+        enqueue_ack(sender_fd, header.sequence);
     }
 
     spdlog::debug("fd={} publish topic={} payload_bytes={} subscribers={}",
@@ -147,4 +145,14 @@ void Router::handle_disconnect(const int fd) {
     fd_topic_slot_.erase(fd_it);
 
     spdlog::debug("fd={} disconnected, removed from {} topics", fd, topic_count);
+}
+
+void Router::enqueue_ack(const int fd, const uint64_t acked_seq) {
+    OutboundMessage ack{};
+    const auto result = encode_ack(ack.data, /*seq=*/0, acked_seq);
+    if (result) {
+        ack.len     = *result;
+        ack.dest_fd = fd;
+        outbound_.enqueue(ack);
+    }
 }
