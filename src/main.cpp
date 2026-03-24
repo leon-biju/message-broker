@@ -27,16 +27,9 @@ int main() {
 
     moodycamel::BlockingConcurrentQueue<InboundMessage>  inbound_queue;
     moodycamel::BlockingConcurrentQueue<OutboundMessage> outbound_queue;
-    Router router(RouterConfig { inbound_queue, outbound_queue, 2 });
+    Router router(inbound_queue, outbound_queue, 2);
 
-    TcpGateway gateway(
-        GatewayConfig{
-        .max_connections = 32,
-        .fd_table_size = 64,
-        .port = 9000,
-        .pinned_cpu_core = 1
-        }, inbound_queue, outbound_queue);
-
+    TcpGateway gateway(inbound_queue, outbound_queue, 32, 64, 9000, 1);
     spdlog::info("Starting Message broker port={} max_connections={} gateway_cpu={} router_cpu={}",
         9000, 32, 1, 2);
 

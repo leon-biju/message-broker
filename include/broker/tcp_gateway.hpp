@@ -53,15 +53,6 @@ public:
     [[nodiscard]] int fd() const { return fd_; }
 };
 
-
-// Configuration settings for the TcpGateway class
-struct GatewayConfig {
-    uint32_t max_connections;    // actual client cap
-    uint32_t fd_table_size;      // rlimit + connection_metadata_ vector size
-    uint16_t port;
-    int      pinned_cpu_core;    // -1 to disable pinning
-};
-
 enum class ParseStage { AwaitingHeader, AwaitingPayload };
 
 // Per-connection metadata. TODO: move buf into a separate buffer pool (hot/cold split)
@@ -87,12 +78,13 @@ struct OutboundMessage {
 };
 
 class TcpGateway {
-    GatewayConfig   config_;
     ListeningSocket listening_socket_;
 
-    // Queues used to collect messages coming in and send messages out
-    moodycamel::BlockingConcurrentQueue<InboundMessage>&  inbound_queue_;
-    moodycamel::BlockingConcurrentQueue<OutboundMessage>& outbound_queue_;
+    uint32_t max_connections_;
+    int      pinned_cpu_core_;
+
+    moodycamel::BlockingConcurrentQueue<InboundMessage>&  inbound_;
+    moodycamel::BlockingConcurrentQueue<OutboundMessage>& outbound_;
 
     std::vector<ConnMeta> connection_metadata_;
     size_t                active_connections_count_ {0};
@@ -100,15 +92,15 @@ class TcpGateway {
     std::thread receiver_thread_;
     std::thread sender_thread_;
 
-    int epoll_fd_{-1};
+    int epoll_fd_ {-1};
+    int wake_fd_  {-1}; // Shutdown signal for recv loop, unblocks epoll wait
 
-    int wake_fd_ {-1}; // Shutdown signal for recv loop, unblocks the epoll wait as well
-    std::atomic_bool send_loop_running_ { true }; // Shutdown signal for send loop
+    std::atomic_bool send_loop_running_ {true}; // Shutdown signal for send loop
 
 public:
-    TcpGateway(const GatewayConfig& config,
-               moodycamel::BlockingConcurrentQueue<InboundMessage>&  inbound_queue,
-               moodycamel::BlockingConcurrentQueue<OutboundMessage>& outbound_queue);
+    TcpGateway(moodycamel::BlockingConcurrentQueue<InboundMessage>&  inbound,
+               moodycamel::BlockingConcurrentQueue<OutboundMessage>& outbound,
+               uint32_t max_connections, uint32_t fd_table_size, uint16_t port, int pinned_cpu_core);
     ~TcpGateway();
     TcpGateway(const TcpGateway&)            = delete;
     TcpGateway& operator=(const TcpGateway&) = delete;
@@ -133,8 +125,8 @@ private:
     void do_send(const OutboundMessage& msg);
 
     // Synchronous error send on the receiver thread, avoids fd-reuse race that would
-    // occur if we enqueued to outbound_queue_ like everyone else and then immediately closed the fd.
-    void send_error_direct(int fd, ErrorCode code, std::string_view msg) noexcept;
+    // occur if we enqueued to outbound_ like everyone else and then immediately closed the fd.
+    static void send_error_direct(int fd, ErrorCode code, std::string_view msg) noexcept;
 };
 
 #endif

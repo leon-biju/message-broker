@@ -20,6 +20,7 @@
 static constexpr int    MAX_EPOLL_EVENTS   = 64;
 static constexpr size_t COMPACT_THRESHOLD  = READ_BUF_SIZE / 2;
 
+//TODO: Move these guys to protocol
 static std::string_view parse_error_str(ParseError e) {
     switch (e) {
         case ParseError::BadMagic:           return "BadMagic";
@@ -40,14 +41,17 @@ static ErrorCode parse_error_to_error_code(const ParseError e) {
     }
 }
 
-TcpGateway::TcpGateway(const GatewayConfig& config,
-                       moodycamel::BlockingConcurrentQueue<InboundMessage>&  inbound_queue,
-                       moodycamel::BlockingConcurrentQueue<OutboundMessage>& outbound_queue)
-    : config_(config)
-    , listening_socket_(ListeningSocket(config.port))
-    , inbound_queue_(inbound_queue)
-    , outbound_queue_(outbound_queue)
+TcpGateway::TcpGateway(
+    moodycamel::BlockingConcurrentQueue<InboundMessage>&  inbound,
+    moodycamel::BlockingConcurrentQueue<OutboundMessage>& outbound,
+    uint32_t max_connections, uint32_t fd_table_size, uint16_t port, int pinned_cpu_core)
+    : listening_socket_(port),
+      max_connections_(max_connections),
+      pinned_cpu_core_(pinned_cpu_core),
+      inbound_(inbound),
+      outbound_(outbound)
 {
+
     epoll_fd_ = epoll_create1(EPOLL_CLOEXEC);
     if (epoll_fd_ < 0) throw std::runtime_error("epoll_create1 failed");
 
@@ -58,12 +62,12 @@ TcpGateway::TcpGateway(const GatewayConfig& config,
     }
 
     const rlimit rl {
-        .rlim_cur = config.fd_table_size,
-        .rlim_max = config.fd_table_size
+        .rlim_cur = fd_table_size,
+        .rlim_max = fd_table_size
     };
     setrlimit(RLIMIT_NOFILE, &rl);
 
-    connection_metadata_.resize(config.fd_table_size); // use resize() so it zeros all the slots as well
+    connection_metadata_.resize(fd_table_size); // use resize() so it zeros all the slots as well
 
     epoll_event ev{};
     ev.events  = EPOLLIN | EPOLLET;
@@ -73,7 +77,7 @@ TcpGateway::TcpGateway(const GatewayConfig& config,
     ev.data.fd = wake_fd_;
     epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, wake_fd_, &ev);
 
-    spdlog::info("tcp gateway listening on port={}", config.port);
+    spdlog::info("tcp gateway listening on port={}", port);
 }
 
 TcpGateway::~TcpGateway() {
@@ -96,17 +100,17 @@ void TcpGateway::stop() {
     }
     if (sender_thread_.joinable()) {
         send_loop_running_.store(false, std::memory_order_relaxed);
-        outbound_queue_.enqueue(OutboundMessage{ .dest_fd = -1 }); // sentinel: unblocks wait_dequeue_bulk
+        outbound_.enqueue(OutboundMessage{ .dest_fd = -1 }); // sentinel: unblocks wait_dequeue_bulk
         sender_thread_.join();
         spdlog::debug("Sender thread on tcpgateway joined!");
     }
 }
 
 void TcpGateway::recv_loop() {
-    if (config_.pinned_cpu_core >= 0) {
+    if (pinned_cpu_core_ >= 0) {
         cpu_set_t cpus{};
         CPU_ZERO(&cpus);
-        CPU_SET(config_.pinned_cpu_core, &cpus);
+        CPU_SET(pinned_cpu_core_, &cpus);
         pthread_setaffinity_np(pthread_self(), sizeof(cpus), &cpus);
     }
 
@@ -151,9 +155,9 @@ void TcpGateway::handle_accept() {
             break;
         }
 
-        if (active_connections_count_ >= config_.max_connections) {
+        if (active_connections_count_ >= max_connections_) {
             spdlog::warn("max connections reached ({}/{}), rejecting fd={}",
-                active_connections_count_, config_.max_connections, client_fd);
+                active_connections_count_, max_connections_, client_fd);
             close(client_fd);
             continue;
         }
@@ -235,7 +239,7 @@ bool TcpGateway::try_dispatch_frames(const int fd) {
                                      conn.cached_header.payload_len);
             auto frame = decode_frame(conn.cached_header, payload);
             if (frame) {
-                inbound_queue_.enqueue({ *frame, fd });
+                inbound_.enqueue({ *frame, fd });
             } else {
                 const ParseError err = frame.error();
                 spdlog::debug("fd={} frame decode error: {}, disconnecting", fd, parse_error_str(err));
@@ -266,7 +270,7 @@ void TcpGateway::send_loop() {
 
     OutboundMessage batch[BATCH];
     while (send_loop_running_.load(std::memory_order_relaxed)) {
-        const size_t n = outbound_queue_.wait_dequeue_bulk(batch, BATCH);
+        const size_t n = outbound_.wait_dequeue_bulk(batch, BATCH);
         for (size_t i = 0; i < n; ++i) {
 
             if (batch[i].dest_fd == -1) {
@@ -311,7 +315,7 @@ void TcpGateway::send_error_direct(const int fd, const ErrorCode code, const std
 void TcpGateway::handle_close(const int fd) {
 
     // Enqueuing this message ensures the router will remove this fd from all future rounds
-    inbound_queue_.enqueue(InboundMessage {
+    inbound_.enqueue(InboundMessage {
         .frame = DecodedFrame {
             .header = {},
             .payload = DisconnectMsg {}

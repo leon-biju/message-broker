@@ -28,12 +28,6 @@ struct StringHash {
     size_t operator()(const std::string_view sv) const { return std::hash<std::string_view>{}(sv); }
 };
 
-struct RouterConfig {
-    moodycamel::BlockingConcurrentQueue<InboundMessage>&  inbound;
-    moodycamel::BlockingConcurrentQueue<OutboundMessage>& outbound;
-    int pinned_cpu_core;    // -1 to disable pinning like gateway?
-};
-
 class Router {
     // Used for sending out messages to subscribers
     std::unordered_map<std::string, std::vector<int>, StringHash, std::equal_to<>> topic_subscribers_;
@@ -51,8 +45,11 @@ class Router {
     std::thread worker_;
     int         pinned_cpu_core_;
 public:
-    explicit Router(const RouterConfig& cfg)
-        : inbound_(cfg.inbound), outbound_(cfg.outbound), pinned_cpu_core_(cfg.pinned_cpu_core) {};
+    explicit Router(
+            moodycamel::BlockingConcurrentQueue<InboundMessage>&  inbound,
+            moodycamel::BlockingConcurrentQueue<OutboundMessage>& outbound,
+            const int pinned_cpu_core
+        ): inbound_(inbound), outbound_(outbound), pinned_cpu_core_(pinned_cpu_core) {};
     void start();
     void stop();
 
