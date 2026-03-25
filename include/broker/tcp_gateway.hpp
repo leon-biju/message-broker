@@ -60,9 +60,14 @@ public:
 
 enum class ParseStage { AwaitingHeader, AwaitingPayload };
 
-// Per-connection metadata. Buffer lives behind a pointer so the fd-indexed vector stays dense/cache-friendly.
-struct ConnMeta {
+// Per-connection structure. Stores parsing state for recv loop and metadata for send loop.
+struct Connection {
+
+    // All messages are read into this buffer.
+    // After the router consumes the message, the watermark is updated to indicate how many bytes have been consumed, 
+    // and the recv loop can compact the buffer by moving remaining data to the front.
     std::unique_ptr<std::byte[]> buf{nullptr}; // allocated on accept, size = CONN_BUF_CAPACITY
+    
     uint32_t    parse_pos     {0};   // start of unprocessed data
     uint32_t    write_pos     {0};   // end of valid data in buf
     ParseStage  stage         {ParseStage::AwaitingHeader};
@@ -83,7 +88,7 @@ struct OutboundMessage {
     static constexpr size_t INLINE_CAP = 256;
 
     std::array<std::byte, INLINE_CAP> inline_buf{};
-    std::unique_ptr<std::byte[]> heap_buf{nullptr};
+    std::unique_ptr<std::byte[]> heap_buf{nullptr}; // large buffers 256B+ spill onto the heap
     uint32_t len{0};
     int      dest_fd{-1};
 
@@ -117,9 +122,11 @@ struct OutboundMessage {
         return heap_buf ? heap_buf.get() : inline_buf.data();
     }
 
-    // Returns a span to encode into. Uses inline buffer if it fits, otherwise allocates.
+    // Given how many bytes required, return a writable buffer. Using inline buf if
     [[nodiscard]] std::span<std::byte> write_buf(const size_t needed) {
-        if (needed <= INLINE_CAP) return {inline_buf.data(), INLINE_CAP};
+        if (needed <= INLINE_CAP) {
+            return {inline_buf.data(), INLINE_CAP};
+        }
         heap_buf = std::make_unique<std::byte[]>(needed);
         return {heap_buf.get(), needed};
     }
@@ -134,7 +141,7 @@ class TcpGateway {
     moodycamel::BlockingConcurrentQueue<InboundMessage>&  inbound_;
     moodycamel::BlockingConcurrentQueue<OutboundMessage>& outbound_;
 
-    std::vector<ConnMeta>              connection_metadata_;
+    std::vector<Connection>            connections;
     std::vector<std::atomic_uint32_t>  consumer_watermark_; // fd-indexed, router stores after consuming
     size_t                             active_connections_count_ {0};
 
@@ -169,13 +176,15 @@ private:
     void handle_close(int fd);
     bool try_dispatch_frames(int fd);
 
+    // Send error directly from the receiver thread
+    // Using queue would be a race, since this thread will also close the fd upon errors and might end up sending on a closed fd
+    static void send_error_direct(int fd, ErrorCode code, std::string_view msg) noexcept;
+
+
     // Functions below run on sender thread
     void send_loop();
     void do_send(const OutboundMessage& msg);
 
-    // Synchronous error send on the receiver thread, avoids fd-reuse race that would
-    // occur if we enqueued to outbound_ like everyone else and then immediately closed the fd.
-    static void send_error_direct(int fd, ErrorCode code, std::string_view msg) noexcept;
 };
 
 #endif

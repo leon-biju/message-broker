@@ -49,7 +49,8 @@ TcpGateway::TcpGateway(
       pinned_cpu_core_(pinned_cpu_core),
       inbound_(inbound),
       outbound_(outbound),
-      consumer_watermark_(fd_table_size)
+      consumer_watermark_(fd_table_size),
+      connections(fd_table_size)
 {
 
     epoll_fd_ = epoll_create1(EPOLL_CLOEXEC);
@@ -67,9 +68,6 @@ TcpGateway::TcpGateway(
     };
     setrlimit(RLIMIT_NOFILE, &rl);
 
-    connection_metadata_.resize(fd_table_size);
-    //TEMPORARY RESERVE THEN
-    //consumer_watermark_.reserve(fd_table_size);
 
     epoll_event ev{};
     ev.events  = EPOLLIN | EPOLLET;
@@ -169,8 +167,8 @@ void TcpGateway::handle_accept() {
         const int nodelay = 1;
         setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
-        auto& conn = connection_metadata_[client_fd];
-        conn = ConnMeta{};
+        auto& conn = connections[client_fd];
+        conn = Connection{};
         conn.buf = std::make_unique<std::byte[]>(CONN_BUF_CAPACITY);
         conn.active = true;
         consumer_watermark_[client_fd].store(0, std::memory_order_relaxed);
@@ -188,7 +186,7 @@ void TcpGateway::handle_accept() {
 }
 
 void TcpGateway::handle_read(const int fd) {
-    ConnMeta& conn = connection_metadata_[fd];
+    Connection& conn = connections[fd];
 
     // Watermark-gated compaction: only reclaim bytes the router has finished with
     const uint32_t wm = consumer_watermark_[fd].load(std::memory_order_acquire);
@@ -228,7 +226,7 @@ void TcpGateway::handle_read(const int fd) {
 }
 
 bool TcpGateway::try_dispatch_frames(const int fd) {
-    ConnMeta& conn = connection_metadata_[fd];
+    Connection& conn = connections[fd];
     while (true) {
         const uint32_t available = conn.write_pos - conn.parse_pos;
 
@@ -340,7 +338,7 @@ void TcpGateway::handle_close(const int fd) {
     });
 
     epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
-    connection_metadata_[fd].active = false;
+    connections[fd].active = false;
     --active_connections_count_;
     close(fd);
 }
