@@ -16,7 +16,12 @@ void Router::start() {
 
 void Router::stop() {
     shutdown_ = true;
-    inbound_.enqueue(InboundMessage{ .frame = DecodedFrame{ .payload = ShutdownMsg{} }, .sender_fd = -1 }); // sentinel: unblocks wait_dequeue_bulk
+    inbound_.enqueue(InboundMessage{
+        .frame = DecodedFrame{ .payload = ShutdownMsg{} },
+        .sender_fd = -1,
+        .watermark_ptr = nullptr,
+        .consumed_up_to = 0
+    }); // sentinel: unblocks wait_dequeue_bulk
     worker_.join();
     spdlog::debug("Router worker thread joined!");
 }
@@ -42,6 +47,10 @@ void Router::run_loop() {
                 else if constexpr (std::is_same_v<T, DisconnectMsg>)  handle_disconnect (msgs[i].sender_fd);
                 // ignore the shutdown message since we want to drain the queue anyway
             }, msgs[i].frame.payload);
+
+            // Signal receiver that we're done with this message's buffer region
+            if (msgs[i].watermark_ptr)
+                msgs[i].watermark_ptr->store(msgs[i].consumed_up_to, std::memory_order_release);
         }
     }
 }
@@ -99,8 +108,9 @@ void Router::handle_publish(const int sender_fd, const PublishMsg& msg, const Fr
 
     if (it != topic_subscribers_.end()) {
         // Encode frame once, then enqueue a copy per subscriber with the correct dst_fd
+        const size_t needed_size = sizeof(FrameHeader) + sizeof(uint16_t) + msg.topic.size() + msg.body.size();
         OutboundMessage out{};
-        const auto result = encode_publish(out.data, /*seq=*/0, msg.topic, msg.body);
+        const auto result = encode_publish(out.write_buf(needed_size), /*seq=*/0, msg.topic, msg.body);
         if (result) {
             out.len = *result;
             for (const int fd : it->second) {
@@ -149,7 +159,7 @@ void Router::handle_disconnect(const int fd) {
 
 void Router::enqueue_ack(const int fd, const uint64_t acked_seq) {
     OutboundMessage ack{};
-    const auto result = encode_ack(ack.data, /*seq=*/0, acked_seq);
+    const auto result = encode_ack(ack.write_buf(sizeof(FrameHeader) + sizeof(uint64_t)), /*seq=*/0, acked_seq);
     if (result) {
         ack.len     = *result;
         ack.dest_fd = fd;

@@ -17,8 +17,7 @@
 
 #include <broker/tcp_gateway.hpp>
 
-static constexpr int    MAX_EPOLL_EVENTS   = 64;
-static constexpr size_t COMPACT_THRESHOLD  = READ_BUF_SIZE / 2;
+static constexpr int MAX_EPOLL_EVENTS = 64;
 
 //TODO: Move these guys to protocol
 static std::string_view parse_error_str(ParseError e) {
@@ -44,12 +43,13 @@ static ErrorCode parse_error_to_error_code(const ParseError e) {
 TcpGateway::TcpGateway(
     moodycamel::BlockingConcurrentQueue<InboundMessage>&  inbound,
     moodycamel::BlockingConcurrentQueue<OutboundMessage>& outbound,
-    uint32_t max_connections, uint32_t fd_table_size, uint16_t port, int pinned_cpu_core)
+    uint32_t max_connections, size_t fd_table_size, uint16_t port, int pinned_cpu_core)
     : listening_socket_(port),
       max_connections_(max_connections),
       pinned_cpu_core_(pinned_cpu_core),
       inbound_(inbound),
-      outbound_(outbound)
+      outbound_(outbound),
+      consumer_watermark_(fd_table_size)
 {
 
     epoll_fd_ = epoll_create1(EPOLL_CLOEXEC);
@@ -67,7 +67,9 @@ TcpGateway::TcpGateway(
     };
     setrlimit(RLIMIT_NOFILE, &rl);
 
-    connection_metadata_.resize(fd_table_size); // use resize() so it zeros all the slots as well
+    connection_metadata_.resize(fd_table_size);
+    //TEMPORARY RESERVE THEN
+    //consumer_watermark_.reserve(fd_table_size);
 
     epoll_event ev{};
     ev.events  = EPOLLIN | EPOLLET;
@@ -100,7 +102,9 @@ void TcpGateway::stop() {
     }
     if (sender_thread_.joinable()) {
         send_loop_running_.store(false, std::memory_order_relaxed);
-        outbound_.enqueue(OutboundMessage{ .dest_fd = -1 }); // sentinel: unblocks wait_dequeue_bulk
+        OutboundMessage sentinel{};
+        sentinel.dest_fd = -1;
+        outbound_.enqueue(std::move(sentinel)); // sentinel: unblocks wait_dequeue_bulk
         sender_thread_.join();
         spdlog::debug("Sender thread on tcpgateway joined!");
     }
@@ -165,8 +169,11 @@ void TcpGateway::handle_accept() {
         const int nodelay = 1;
         setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
-        connection_metadata_[client_fd] = ConnMeta{};
-        connection_metadata_[client_fd].active = true;
+        auto& conn = connection_metadata_[client_fd];
+        conn = ConnMeta{};
+        conn.buf = std::make_unique<std::byte[]>(CONN_BUF_CAPACITY);
+        conn.active = true;
+        consumer_watermark_[client_fd].store(0, std::memory_order_relaxed);
         ++active_connections_count_;
 
         epoll_event ev{};
@@ -182,15 +189,27 @@ void TcpGateway::handle_accept() {
 
 void TcpGateway::handle_read(const int fd) {
     ConnMeta& conn = connection_metadata_[fd];
+
+    // Watermark-gated compaction: only reclaim bytes the router has finished with
+    const uint32_t wm = consumer_watermark_[fd].load(std::memory_order_acquire);
+    if (wm > 0) {
+        const uint32_t remaining = conn.write_pos - wm;
+        if (remaining > 0)
+            std::memmove(conn.buf.get(), conn.buf.get() + wm, remaining);
+        conn.write_pos -= wm;
+        conn.parse_pos -= wm;
+        consumer_watermark_[fd].store(0, std::memory_order_relaxed);
+    }
+
     while (true) {
-        const size_t space = conn.buf.size() - conn.bytes_in_buf;
-        if (space == 0) {
-            spdlog::info("fd={} recv buffer full, disconnecting", fd);
+        const size_t space = CONN_BUF_CAPACITY - conn.write_pos;
+        if (space <= 0) {
+            spdlog::info("fd={} recv buffer full (consumer not keeping up), disconnecting", fd);
             handle_close(fd);
             return;
         }
 
-        const ssize_t n = recv(fd, conn.buf.data() + conn.bytes_in_buf, space, 0);
+        const ssize_t n = recv(fd, conn.buf.get() + conn.write_pos, space, 0);
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
             spdlog::info("fd={} recv error: {}, disconnecting", fd, strerror(errno));
@@ -203,7 +222,7 @@ void TcpGateway::handle_read(const int fd) {
             return;
         }
 
-        conn.bytes_in_buf += static_cast<size_t>(n);
+        conn.write_pos += static_cast<uint32_t>(n);
         if (!try_dispatch_frames(fd)) return;
     }
 }
@@ -211,13 +230,13 @@ void TcpGateway::handle_read(const int fd) {
 bool TcpGateway::try_dispatch_frames(const int fd) {
     ConnMeta& conn = connection_metadata_[fd];
     while (true) {
-        const size_t available = conn.bytes_in_buf - conn.read_offset;
+        const uint32_t available = conn.write_pos - conn.parse_pos;
 
         if (conn.stage == ParseStage::AwaitingHeader) {
             if (available < sizeof(FrameHeader)) break;
 
             const auto raw = std::span<const std::byte, sizeof(FrameHeader)>(
-                conn.buf.data() + conn.read_offset, sizeof(FrameHeader));
+                conn.buf.get() + conn.parse_pos, sizeof(FrameHeader));
             const auto result = parse_header(raw);
             if (!result) {
                 const ParseError err = result.error();
@@ -232,33 +251,28 @@ bool TcpGateway::try_dispatch_frames(const int fd) {
         }
 
         if (conn.stage == ParseStage::AwaitingPayload) {
-            const size_t total = sizeof(FrameHeader) + conn.cached_header.payload_len;
+            const uint32_t total = sizeof(FrameHeader) + conn.cached_header.payload_len;
             if (available < total) break;
 
-            auto payload = std::span(conn.buf.data() + conn.read_offset + sizeof(FrameHeader),
+            auto payload = std::span(conn.buf.get() + conn.parse_pos + sizeof(FrameHeader),
                                      conn.cached_header.payload_len);
             auto frame = decode_frame(conn.cached_header, payload);
             if (frame) {
-                inbound_.enqueue({ *frame, fd });
+                conn.parse_pos += total;
+                conn.stage = ParseStage::AwaitingHeader;
+
+                inbound_.enqueue(InboundMessage{
+                    .frame = *frame,
+                    .sender_fd = fd,
+                    .watermark_ptr = &consumer_watermark_[fd],
+                    .consumed_up_to = conn.parse_pos
+                });
             } else {
                 const ParseError err = frame.error();
                 spdlog::debug("fd={} frame decode error: {}, disconnecting", fd, parse_error_str(err));
-                send_error_direct(fd, parse_error_to_error_code(err), parse_error_str(err)); //send this first then close
+                send_error_direct(fd, parse_error_to_error_code(err), parse_error_str(err));
                 handle_close(fd);
                 return false;
-            }
-
-            conn.read_offset += total;
-            conn.stage = ParseStage::AwaitingHeader;
-
-            // Compact only when the dead prefix exceeds the threshold
-            if (conn.read_offset >= COMPACT_THRESHOLD) {
-                const size_t remaining = conn.bytes_in_buf - conn.read_offset;
-                spdlog::debug("fd={} compacting buffer remaining={}", fd, remaining);
-                if (remaining > 0)
-                    std::memmove(conn.buf.data(), conn.buf.data() + conn.read_offset, remaining);
-                conn.bytes_in_buf = remaining;
-                conn.read_offset  = 0;
             }
         }
     }
@@ -283,7 +297,7 @@ void TcpGateway::send_loop() {
 }
 
 void TcpGateway::do_send(const OutboundMessage& msg) { //NOLINT
-    const std::byte* ptr = msg.data.data();
+    const std::byte* ptr = msg.data();
     size_t remaining     = msg.len;
     while (remaining > 0) {
         const ssize_t sent = send(msg.dest_fd, ptr, remaining, MSG_NOSIGNAL);
@@ -320,7 +334,9 @@ void TcpGateway::handle_close(const int fd) {
             .header = {},
             .payload = DisconnectMsg {}
         },
-        .sender_fd = fd
+        .sender_fd = fd,
+        .watermark_ptr = nullptr,
+        .consumed_up_to = 0
     });
 
     epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);

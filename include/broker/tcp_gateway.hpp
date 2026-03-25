@@ -8,7 +8,11 @@
  */
 
 #include <array>
+#include <atomic>
 #include <cstddef>
+#include <cstring>
+#include <memory>
+#include <span>
 #include <stdexcept>
 #include <thread>
 #include <unistd.h>
@@ -19,7 +23,8 @@
 #include <blockingconcurrentqueue.h>
 #include <broker/protocol.hpp>
 
-inline constexpr size_t READ_BUF_SIZE = sizeof(FrameHeader) + MAX_PAYLOAD_LEN;
+inline constexpr size_t READ_BUF_SIZE    = sizeof(FrameHeader) + MAX_PAYLOAD_LEN;
+inline constexpr size_t CONN_BUF_CAPACITY = 131072; // 128KiB, power of two
 
 // Lightweight RAII wrapper for listening socket, probably don't need this tbh, might remove in later versions
 class ListeningSocket {
@@ -55,26 +60,69 @@ public:
 
 enum class ParseStage { AwaitingHeader, AwaitingPayload };
 
-// Per-connection metadata. TODO: move buf into a separate buffer pool (hot/cold split)
+// Per-connection metadata. Buffer lives behind a pointer so the fd-indexed vector stays dense/cache-friendly.
 struct ConnMeta {
-    //This buf is what the messages rely on to keep the string view alive
-    // This MUST outlive all messages that rely on this before they get processed and die
-    std::array<std::byte, READ_BUF_SIZE> buf{}; //HELL NO THIS IS AWFUL USE OF STACK
-    size_t      bytes_in_buf  {0};   // write cursor: end of valid data in buf
-    size_t      read_offset   {0};   // parse cursor: start of unprocessed data
+    std::unique_ptr<std::byte[]> buf{nullptr}; // allocated on accept, size = CONN_BUF_CAPACITY
+    uint32_t    parse_pos     {0};   // start of unprocessed data
+    uint32_t    write_pos     {0};   // end of valid data in buf
     ParseStage  stage         {ParseStage::AwaitingHeader};
     FrameHeader cached_header {};
     bool        active        {false};
 };
 
-// Decoded Message + sender fd
-struct InboundMessage { DecodedFrame frame; int sender_fd; }; // NOLINT
+// Decoded Message + sender fd + watermark for buffer lifetime signaling
+struct InboundMessage {
+    DecodedFrame frame;
+    int sender_fd;
+    std::atomic<uint32_t>* watermark_ptr{nullptr}; // null for Disconnect/Shutdown
+    uint32_t consumed_up_to{0};                     // byte offset past this frame in conn buffer
+};
 
-// Pre-encoded frame + destination fd. Zero-allocation: router encodes into a local instance and enqueues by value.
+// Pre-encoded frame + destination fd. SBO: most messages fit in the inline buffer; large publishes spill to heap.
 struct OutboundMessage {
-    std::array<std::byte, READ_BUF_SIZE> data; // pre-encoded wire frame, this is also very bad and disgusting
-    size_t  len;    // how many bytes to actually send [0..len)
-    int     dest_fd; // destination client socket
+    static constexpr size_t INLINE_CAP = 256;
+
+    std::array<std::byte, INLINE_CAP> inline_buf{};
+    std::unique_ptr<std::byte[]> heap_buf{nullptr};
+    uint32_t len{0};
+    int      dest_fd{-1};
+
+    OutboundMessage() = default;
+
+    OutboundMessage(const OutboundMessage& o)
+        : inline_buf(o.inline_buf), len(o.len), dest_fd(o.dest_fd) {
+        if (o.heap_buf) {
+            heap_buf = std::make_unique<std::byte[]>(o.len);
+            std::memcpy(heap_buf.get(), o.heap_buf.get(), o.len);
+        }
+    }
+    OutboundMessage& operator=(const OutboundMessage& o) {
+        if (this != &o) {
+            inline_buf = o.inline_buf;
+            len = o.len;
+            dest_fd = o.dest_fd;
+            if (o.heap_buf) {
+                heap_buf = std::make_unique<std::byte[]>(o.len);
+                std::memcpy(heap_buf.get(), o.heap_buf.get(), o.len);
+            } else {
+                heap_buf.reset();
+            }
+        }
+        return *this;
+    }
+    OutboundMessage(OutboundMessage&&) = default;
+    OutboundMessage& operator=(OutboundMessage&&) = default;
+
+    [[nodiscard]] const std::byte* data() const {
+        return heap_buf ? heap_buf.get() : inline_buf.data();
+    }
+
+    // Returns a span to encode into. Uses inline buffer if it fits, otherwise allocates.
+    [[nodiscard]] std::span<std::byte> write_buf(const size_t needed) {
+        if (needed <= INLINE_CAP) return {inline_buf.data(), INLINE_CAP};
+        heap_buf = std::make_unique<std::byte[]>(needed);
+        return {heap_buf.get(), needed};
+    }
 };
 
 class TcpGateway {
@@ -86,8 +134,9 @@ class TcpGateway {
     moodycamel::BlockingConcurrentQueue<InboundMessage>&  inbound_;
     moodycamel::BlockingConcurrentQueue<OutboundMessage>& outbound_;
 
-    std::vector<ConnMeta> connection_metadata_;
-    size_t                active_connections_count_ {0};
+    std::vector<ConnMeta>              connection_metadata_;
+    std::vector<std::atomic_uint32_t>  consumer_watermark_; // fd-indexed, router stores after consuming
+    size_t                             active_connections_count_ {0};
 
     std::thread receiver_thread_;
     std::thread sender_thread_;
@@ -100,7 +149,7 @@ class TcpGateway {
 public:
     TcpGateway(moodycamel::BlockingConcurrentQueue<InboundMessage>&  inbound,
                moodycamel::BlockingConcurrentQueue<OutboundMessage>& outbound,
-               uint32_t max_connections, uint32_t fd_table_size, uint16_t port, int pinned_cpu_core);
+               uint32_t max_connections, size_t fd_table_size, uint16_t port, int pinned_cpu_core);
     ~TcpGateway();
     TcpGateway(const TcpGateway&)            = delete;
     TcpGateway& operator=(const TcpGateway&) = delete;
