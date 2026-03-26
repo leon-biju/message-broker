@@ -42,6 +42,7 @@ static bool recv_all(const int fd, std::byte* data, const size_t len) {
 }
 
 int main(int argc, char* argv[]) {
+    std::println("Subscriber starting...");
     const char*    host  = argc > 1 ? argv[1] : "127.0.0.1";
     const uint16_t port  = argc > 2 ? static_cast<uint16_t>(std::stoi(argv[2])) : 9000;
     const char*    topic = argc > 3 ? argv[3] : "test/topic";
