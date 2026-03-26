@@ -187,19 +187,21 @@ void TcpGateway::handle_accept() {
     }
 }
 
-void TcpGateway::handle_read(const int fd) {
-    Connection& conn = connections[fd];
-
-    // Watermark-gated compaction: only reclaim bytes the router has finished with
-    const uint32_t wm = consumer_watermark_[fd].load(std::memory_order_acquire);
+void compact_if_needed(Connection& conn, std::atomic<uint32_t>& watermark) {
+    const uint32_t wm = watermark.load(std::memory_order_acquire);
     if (wm > 0) {
         const uint32_t remaining = conn.write_pos - wm;
         if (remaining > 0)
             std::memmove(conn.buf.get(), conn.buf.get() + wm, remaining);
         conn.write_pos -= wm;
         conn.parse_pos -= wm;
-        consumer_watermark_[fd].store(0, std::memory_order_relaxed);
+        watermark.store(0, std::memory_order_relaxed);
     }
+}
+
+void TcpGateway::handle_read(const int fd) {
+    Connection& conn = connections[fd];
+    compact_if_needed(conn, consumer_watermark_[fd]);
 
     while (true) {
         const size_t space = CONN_BUF_CAPACITY - conn.write_pos;
@@ -227,8 +229,11 @@ void TcpGateway::handle_read(const int fd) {
     }
 }
 
-bool TcpGateway::try_dispatch_frames(const int fd) {
-    Connection& conn = connections[fd];
+std::optional<ParseError> dispatch_frames_impl(
+    const int fd, Connection& conn,
+    moodycamel::BlockingConcurrentQueue<InboundMessage>& inbound,
+    std::atomic<uint32_t>& watermark)
+{
     while (true) {
         const uint32_t available = conn.write_pos - conn.parse_pos;
 
@@ -239,12 +244,7 @@ bool TcpGateway::try_dispatch_frames(const int fd) {
                 conn.buf.get() + conn.parse_pos, sizeof(FrameHeader));
             const auto result = parse_header(raw);
             if (!result) {
-                const ParseError err = result.error();
-                spdlog::debug("fd={} header parse error: {}, disconnecting",
-                    fd, parse_error_str(err));
-                send_error_direct(fd, parse_error_to_error_code(err), parse_error_str(err));
-                handle_close(fd);
-                return false;
+                return result.error();
             }
             conn.cached_header = *result;
             conn.stage = ParseStage::AwaitingPayload;
@@ -261,20 +261,27 @@ bool TcpGateway::try_dispatch_frames(const int fd) {
                 conn.parse_pos += total;
                 conn.stage = ParseStage::AwaitingHeader;
 
-                inbound_.enqueue(InboundMessage{
+                inbound.enqueue(InboundMessage{
                     .frame = *frame,
                     .sender_fd = fd,
-                    .watermark_ptr = &consumer_watermark_[fd],
+                    .watermark_ptr = &watermark,
                     .consumed_up_to = conn.parse_pos
                 });
             } else {
-                const ParseError err = frame.error();
-                spdlog::debug("fd={} frame decode error: {}, disconnecting", fd, parse_error_str(err));
-                send_error_direct(fd, parse_error_to_error_code(err), parse_error_str(err));
-                handle_close(fd);
-                return false;
+                return frame.error();
             }
         }
+    }
+    return std::nullopt;
+}
+
+bool TcpGateway::try_dispatch_frames(const int fd) {
+    const auto err = dispatch_frames_impl(fd, connections[fd], inbound_, consumer_watermark_[fd]);
+    if (err) {
+        spdlog::debug("fd={} parse error: {}, disconnecting", fd, parse_error_str(*err));
+        send_error_direct(fd, parse_error_to_error_code(*err), parse_error_str(*err));
+        handle_close(fd);
+        return false;
     }
     return true;
 }

@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <thread>
@@ -131,6 +132,18 @@ struct OutboundMessage {
         return {heap_buf.get(), needed};
     }
 };
+
+// Parses and dispatches all complete frames from conn's buffer into inbound.
+// Returns ParseError if a frame is broken
+std::optional<ParseError> dispatch_frames_impl(
+    int fd,
+    Connection& conn,
+    moodycamel::BlockingConcurrentQueue<InboundMessage>& inbound,
+    std::atomic<uint32_t>& watermark);
+
+// Watermark-gated compaction: if watermark > 0, memmove remaining bytes to
+// the front and reset parse_pos / write_pos accordingly
+void compact_if_needed(Connection& conn, std::atomic<uint32_t>& watermark);
 
 class TcpGateway {
     ListeningSocket listening_socket_;
