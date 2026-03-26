@@ -75,6 +75,7 @@ int main(int argc, char* argv[]) {
     std::array<std::byte, sizeof(FrameHeader) + MAX_TOPIC_LEN + sizeof(uint16_t)> sub_buf{};
     std::array<std::byte, sizeof(FrameHeader) + sizeof(uint64_t)> ack_buf{};
     uint64_t seq = 0;
+    uint64_t expected_broker_seq = 0;
     {
         const auto result = encode_subscribe(sub_buf, ++seq, topic, MessageType::SUBSCRIBE);
         if (!result) {
@@ -100,6 +101,11 @@ int main(int argc, char* argv[]) {
             std::println(stderr, "parse SUBSCRIBE ACK header failed");
             close(fd);
             return 1;
+        }
+        ++expected_broker_seq;
+        if (ack_hdr->sequence != expected_broker_seq) {
+            std::println(stderr, "WARN: broker seq gap: expected={} got={}", expected_broker_seq, ack_hdr->sequence);
+            expected_broker_seq = ack_hdr->sequence;
         }
         if (ack_hdr->payload_len > 0) {
             if (!recv_all(fd, ack_buf.data() + sizeof(FrameHeader), ack_hdr->payload_len)) {
@@ -153,6 +159,11 @@ int main(int argc, char* argv[]) {
             break;
         }
         const FrameHeader& hdr = *hdr_result;
+        ++expected_broker_seq;
+        if (hdr.sequence != expected_broker_seq) {
+            std::println(stderr, "WARN: broker seq gap: expected={} got={}", expected_broker_seq, hdr.sequence);
+            expected_broker_seq = hdr.sequence;
+        }
 
         // Read payload
         if (hdr.payload_len > 0) {

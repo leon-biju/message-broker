@@ -84,6 +84,7 @@ int main(int argc, char* argv[]) {
     const auto interval = std::chrono::nanoseconds(1'000'000'000 / rate_hz);
     const auto body     = std::as_bytes(std::span(std::string_view{payload}));
     uint64_t seq = 0;
+    uint64_t expected_broker_seq = 0;
 
     while (g_running.load(std::memory_order_relaxed)) {
         const auto result = encode_publish(buf, ++seq, topic, body);
@@ -105,6 +106,11 @@ int main(int argc, char* argv[]) {
         if (!ack_hdr) {
             std::println(stderr, "parse ACK header failed (seq={})", seq);
             break;
+        }
+        ++expected_broker_seq;
+        if (ack_hdr->sequence != expected_broker_seq) {
+            std::println(stderr, "WARN: broker seq gap: expected={} got={}", expected_broker_seq, ack_hdr->sequence);
+            expected_broker_seq = ack_hdr->sequence;
         }
         if (ack_hdr->payload_len > 0) {
             if (!recv_all(fd, ack_buf.data() + sizeof(FrameHeader), ack_hdr->payload_len)) {

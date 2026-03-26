@@ -76,7 +76,7 @@ struct Connection {
 };
 
 // Decoded Message + sender fd + watermark for buffer lifetime signaling
-struct InboundMessage {
+struct InboundMessage { //NOLINT
     DecodedFrame frame;
     int sender_fd;
     std::atomic<uint32_t>* watermark_ptr{nullptr}; // null for Disconnect/Shutdown
@@ -143,6 +143,7 @@ class TcpGateway {
 
     std::vector<Connection>            connections;
     std::vector<std::atomic_uint32_t>  consumer_watermark_; // fd-indexed, router stores after consuming
+    std::vector<std::atomic_uint64_t>  outbound_seq_;       // fd-indexed, broker→client monotonic counter
     size_t                             active_connections_count_ {0};
 
     std::thread receiver_thread_;
@@ -178,7 +179,7 @@ private:
 
     // Send error directly from the receiver thread
     // Using queue would be a race, since this thread will also close the fd upon errors and might end up sending on a closed fd
-    static void send_error_direct(int fd, ErrorCode code, std::string_view msg) noexcept;
+    void send_error_direct(int fd, ErrorCode code, std::string_view msg) noexcept;
 
 
     // Functions below run on sender thread
