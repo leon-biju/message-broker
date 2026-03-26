@@ -73,6 +73,7 @@ int main(int argc, char* argv[]) {
 
     // Send SUBSCRIBE
     std::array<std::byte, sizeof(FrameHeader) + MAX_TOPIC_LEN + sizeof(uint16_t)> sub_buf{};
+    std::array<std::byte, sizeof(FrameHeader) + sizeof(uint64_t)> ack_buf{};
     uint64_t seq = 0;
     {
         const auto result = encode_subscribe(sub_buf, ++seq, topic, MessageType::SUBSCRIBE);
@@ -87,6 +88,55 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         std::println("Sent SUBSCRIBE seq={} topic=\"{}\"", seq, topic);
+
+        // Wait for ACK
+        if (!recv_all(fd, ack_buf.data(), sizeof(FrameHeader))) {
+            std::println(stderr, "recv SUBSCRIBE ACK header failed: {}", strerror(errno));
+            close(fd);
+            return 1;
+        }
+        const auto ack_hdr = parse_header(std::span{ack_buf.data(), sizeof(FrameHeader)});
+        if (!ack_hdr) {
+            std::println(stderr, "parse SUBSCRIBE ACK header failed");
+            close(fd);
+            return 1;
+        }
+        if (ack_hdr->payload_len > 0) {
+            if (!recv_all(fd, ack_buf.data() + sizeof(FrameHeader), ack_hdr->payload_len)) {
+                std::println(stderr, "recv SUBSCRIBE ACK payload failed: {}", strerror(errno));
+                close(fd);
+                return 1;
+            }
+        }
+        const auto ack_frame = decode_frame(*ack_hdr, std::span{
+            ack_buf.data() + sizeof(FrameHeader), ack_hdr->payload_len});
+        if (!ack_frame) {
+            std::println(stderr, "decode SUBSCRIBE ACK failed");
+            close(fd);
+            return 1;
+        }
+        bool subscribed = std::visit([&](const auto& msg) -> bool {
+            using T = std::decay_t<decltype(msg)>;
+            if constexpr (std::is_same_v<T, AckMsg>) {
+                if (msg.acked_seq != seq) {
+                    std::println(stderr, "SUBSCRIBE ACK seq mismatch: expected={} got={}", seq, msg.acked_seq);
+                    return false;
+                }
+                std::println("SUBSCRIBE ACK received (acked_seq={})", msg.acked_seq);
+                return true;
+            } else if constexpr (std::is_same_v<T, ErrorMsg>) {
+                std::println(stderr, "Broker rejected SUBSCRIBE: {} — {}",
+                    to_string(msg.code), msg.error_msg);
+                return false;
+            } else {
+                std::println(stderr, "Unexpected response to SUBSCRIBE (expected ACK)");
+                return false;
+            }
+        }, ack_frame->payload);
+        if (!subscribed) {
+            close(fd);
+            return 1;
+        }
     }
 
     // Receive loop
@@ -123,12 +173,13 @@ int main(int argc, char* argv[]) {
                 const std::string_view body{
                     reinterpret_cast<const char*>(msg.body.data()), msg.body.size()};
                 std::println(R"([{}] topic="{}" body="{}")", msg_count, msg.topic, body);
+            } else if constexpr (std::is_same_v<T, AckMsg>) {
+                std::println("ACK received (acked_seq={})", msg.acked_seq);
             } else if constexpr (std::is_same_v<T, ErrorMsg>) {
                 std::println(stderr, "ERROR from broker: {} — {}",
                     to_string(msg.code), msg.error_msg);
                 g_running.store(false, std::memory_order_relaxed);
             }
-            // ACK and others are silently ignored
         }, frame_result->payload);
     }
 
