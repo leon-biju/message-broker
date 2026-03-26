@@ -291,11 +291,11 @@ void TcpGateway::send_loop() {
                 // sentinel: this is a shutdown signal. we still care about the rest of the queue tho so just ignore and finish up
                 continue;
             }
-            // Stamp broker -> client outbound sequence just before sending it out
+            // Stamp broker->client outbound sequence just before hitting the wire
             {
                 std::byte* buf_ptr = batch[i].heap_buf ? batch[i].heap_buf.get() : batch[i].inline_buf.data();
-                auto* hdr = reinterpret_cast<FrameHeader*>(buf_ptr);
-                hdr->sequence = outbound_seq_[batch[i].dest_fd].fetch_add(1, std::memory_order_relaxed) + 1;
+                write_sequence({buf_ptr, batch[i].len},
+                               outbound_seq_[batch[i].dest_fd].fetch_add(1, std::memory_order_relaxed) + 1);
             }
             do_send(batch[i]);
         }
@@ -322,13 +322,8 @@ void TcpGateway::send_error_direct(const int fd, const ErrorCode code, const std
     const auto result = encode_error(buf, /*seq=*/0, code, msg);
     if (!result) return;
 
-    auto* hdr = reinterpret_cast<FrameHeader*>(buf.data());
-    hdr->sequence = outbound_seq_[fd].fetch_add(1, std::memory_order_relaxed) + 1;
-
-    // mischievous act please remove:
-    if (hdr->sequence== 5) {
-        hdr->sequence = 0; // sequence=0 is invalid, should trigger protocol error on client side. used for testing client's error handling
-    }
+    write_sequence({buf.data(), *result},
+                   outbound_seq_[fd].fetch_add(1, std::memory_order_relaxed) + 1);
 
     const std::byte* ptr = buf.data();
     size_t remaining     = *result;

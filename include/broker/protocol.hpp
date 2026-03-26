@@ -198,6 +198,14 @@ struct DecodedFrame {
 
 /***  ENCODING ***/
 
+// Stamp the sequence field on an already-encoded frame. Called by the gateway
+// immediately before writing to the socket
+// Since the gateway owns outbound sequence numbering; encoders leave it as 0.
+inline void write_sequence(const std::span<std::byte> frame, const uint64_t seq) noexcept {
+    reinterpret_cast<FrameHeader*>(frame.data())->sequence = seq;
+}
+
+
 [[nodiscard]] inline std::expected<size_t, EncodeError> encode_subscribe ( //also unsubscribe
     std::span<std::byte> buf,
     const uint64_t seq,
