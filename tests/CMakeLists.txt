@@ -3,6 +3,7 @@ enable_testing()
 add_executable(broker_tests
     protocol_test.cpp
     router_test.cpp
+    tcp_gateway_test.cpp
     outbound_message_test.cpp
 )
 
