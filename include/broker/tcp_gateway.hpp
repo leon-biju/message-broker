@@ -143,7 +143,7 @@ class TcpGateway {
 
     std::vector<Connection>            connections;
     std::vector<std::atomic_uint32_t>  consumer_watermark_; // fd-indexed, router stores after consuming
-    std::vector<std::atomic_uint64_t>  outbound_seq_;       // fd-indexed, broker→client monotonic counter
+    std::vector<std::atomic_uint64_t>  outbound_seq_;       // fd-indexed, broker->client monotonic counter
     size_t                             active_connections_count_ {0};
 
     std::thread receiver_thread_;
