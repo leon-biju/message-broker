@@ -4,6 +4,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <print>
 #include <string_view>
@@ -84,12 +85,12 @@ int main(int argc, char* argv[]) {
             close(fd);
             return 1;
         }
+        const auto t0 = std::chrono::steady_clock::now();
         if (!send_all(fd, sub_buf.data(), *result)) {
             std::println(stderr, "send SUBSCRIBE failed: {}", strerror(errno));
             close(fd);
             return 1;
         }
-        std::println("Sent SUBSCRIBE seq={} topic=\"{}\"", seq, topic);
 
         // Wait for ACK
         if (!recv_all(fd, ack_buf.data(), sizeof(FrameHeader))) {
@@ -129,7 +130,10 @@ int main(int argc, char* argv[]) {
                     std::println(stderr, "SUBSCRIBE ACK seq mismatch: expected={} got={}", seq, msg.acked_seq);
                     return false;
                 }
-                std::println("SUBSCRIBE ACK received (acked_seq={})", msg.acked_seq);
+                const auto rtt_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - t0).count();
+                std::println(R"(SUBSCRIBE seq={} topic="{}" time={:.3f} ms)",
+                    msg.acked_seq, topic, rtt_us / 1000.0);
                 return true;
             } else if constexpr (std::is_same_v<T, ErrorMsg>) {
                 std::println(stderr, "Broker rejected SUBSCRIBE: {} — {}",

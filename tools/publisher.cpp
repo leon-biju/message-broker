@@ -93,6 +93,7 @@ int main(int argc, char* argv[]) {
             std::println(stderr, "encode_publish failed (seq={})", seq);
             break;
         }
+        const auto t0 = std::chrono::steady_clock::now();
         if (!send_all(fd, buf.data(), *result)) {
             std::println(stderr, "send failed (seq={}): {}", seq, strerror(errno));
             break;
@@ -144,7 +145,10 @@ int main(int argc, char* argv[]) {
         }, ack_frame->payload);
         if (!ok) break;
 
-        std::println(R"(Published seq={} topic="{}" payload="{}" — ACK received)", seq, topic, payload);
+        const auto rtt_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+        std::println(R"(seq={} topic="{}" payload="{}" time={:.3f} ms)",
+            seq, topic, payload, rtt_us / 1000.0);
         std::this_thread::sleep_for(interval);
     }
 
