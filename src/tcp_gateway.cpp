@@ -351,7 +351,7 @@ void TcpGateway::handle_close(const int fd) {
             .payload = DisconnectMsg {}
         },
         .sender_fd = fd,
-        .watermark_ptr = nullptr,
+        .watermark_ptr = &consumer_watermark_[fd],  // reset watermark after all stale messages drain
         .consumed_up_to = 0
     });
 
