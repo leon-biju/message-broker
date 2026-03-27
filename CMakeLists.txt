@@ -33,6 +33,7 @@ target_include_directories(broker_lib PUBLIC include) #Including headers as well
 target_link_libraries(broker_lib PUBLIC
     concurrentqueue
     spdlog::spdlog
+    prometheus-cpp::pull
 )
 
 # Main executable
@@ -41,7 +42,6 @@ target_link_libraries(broker PRIVATE broker_lib)
 
 
 # Tools and tests TODO
-#add_subdirectory(tools/load_gen)
 add_subdirectory(tools)
 add_subdirectory(tests)
 

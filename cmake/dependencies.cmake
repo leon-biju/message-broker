@@ -18,6 +18,10 @@ FetchContent_Declare(spdlog
     GIT_REPOSITORY https://github.com/gabime/spdlog.git
     GIT_TAG        v1.15.3)
 
+FetchContent_Declare(prometheus_cpp
+    GIT_REPOSITORY https://github.com/jupp0r/prometheus-cpp.git
+    GIT_TAG        v1.3.0)
+
 FetchContent_Declare(tomlplusplus
     GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git
     GIT_TAG        v3.4.0)
@@ -29,8 +33,12 @@ FetchContent_MakeAvailable(
         google_benchmark
         spdlog
 )
+
 FetchContent_MakeAvailable(tomlplusplus)
 
+# Disable prometheus-cpp's bundled test deps avoid gmock target collision
+set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(prometheus_cpp)
 
 get_directory_property(_targets BUILDSYSTEM_TARGETS)
 message(STATUS "Targets: ${_targets}")
