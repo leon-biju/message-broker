@@ -1,0 +1,17 @@
+topic            = "test/topic"
+publisher_count  = 4
+subscriber_count = 2
+warmup_secs      = 2
+measure_secs     = 10
+max_throughput   = true
+
+# Inline buffer threshold = 256 - 24 (header) - 2 (topic_len) - len(topic) bytes
+# For topic "test/topic" (10 chars): threshold = 220 bytes
+# 64B: defo inline
+# 224B: just spills to heap (frame = 260 B, 4 B over 256 B cap)
+# 4096B: heavy
+payload_sizes = [64, 224, 4096]
+
+# Explicit rate steps in msg/s (aggregate across all publishers)
+# max_throughput = true appends an unlimited phase as well
+rate_list = [1000, 5000, 10000, 25000, 50000, 100000]
