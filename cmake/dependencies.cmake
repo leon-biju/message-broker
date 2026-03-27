@@ -18,6 +18,10 @@ FetchContent_Declare(spdlog
     GIT_REPOSITORY https://github.com/gabime/spdlog.git
     GIT_TAG        v1.15.3)
 
+FetchContent_Declare(tomlplusplus
+    GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git
+    GIT_TAG        v3.4.0)
+
 
 FetchContent_MakeAvailable(
         concurrent_queue
@@ -25,6 +29,8 @@ FetchContent_MakeAvailable(
         google_benchmark
         spdlog
 )
+FetchContent_MakeAvailable(tomlplusplus)
+
 
 get_directory_property(_targets BUILDSYSTEM_TARGETS)
 message(STATUS "Targets: ${_targets}")
