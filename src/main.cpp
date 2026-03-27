@@ -3,6 +3,7 @@
 #include <spdlog/spdlog.h>
 #include <spdlog/async.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
+#include <spdlog/cfg/env.h>
 
 #include <broker/tcp_gateway.hpp>
 #include <broker/router.hpp>
@@ -22,7 +23,7 @@ int main() {
     spdlog::init_thread_pool(8192, 1);
     auto logger = spdlog::stdout_color_mt<spdlog::async_factory>("broker");
     spdlog::set_default_logger(logger);
-    spdlog::set_level(spdlog::level::debug);
+    spdlog::cfg::load_env_levels();  // respects SPDLOG_LEVEL env var; falls back to debug
     spdlog::set_pattern("[%H:%M:%S.%e] [%^%l%$] [%t] %v");
 
     moodycamel::BlockingConcurrentQueue<InboundMessage>  inbound_queue;
