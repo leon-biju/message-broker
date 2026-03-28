@@ -114,8 +114,12 @@ void Router::handle_publish(const int sender_fd, const PublishMsg& msg, const Fr
         if (result) {
             out.len = *result;
             for (const int fd : it->second) {
-                out.dest_fd = fd;
-                outbound_.enqueue(out);
+                if (outbound_.queues[fd].push(out)) {
+                    outbound_.dirty.enqueue(fd); //tells gateway sender thread to check this fd's queue
+                } else {
+                    // Ring buffer full so just  drop message for this subscriber (backpressure)
+                    spdlog::warn("fd={} outbound ring full, dropping publish topic={}", fd, msg.topic);
+                }
             }
         }
     }
@@ -161,8 +165,11 @@ void Router::enqueue_ack(const int fd, const uint64_t acked_seq) {
     OutboundMessage ack{};
     const auto result = encode_ack(ack.write_buf(sizeof(FrameHeader) + sizeof(uint64_t)), /*seq=*/0, acked_seq);
     if (result) {
-        ack.len     = *result;
-        ack.dest_fd = fd;
-        outbound_.enqueue(ack);
+        ack.len = *result;
+        if (outbound_.queues[fd].push(ack)) {
+            outbound_.dirty.enqueue(fd);
+        } else {
+            spdlog::warn("fd={} outbound ring full, dropping ack message", fd);
+        }
     }
 }

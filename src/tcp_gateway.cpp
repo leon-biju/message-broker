@@ -41,8 +41,8 @@ static ErrorCode parse_error_to_error_code(const ParseError e) {
 }
 
 TcpGateway::TcpGateway(
-    moodycamel::BlockingConcurrentQueue<InboundMessage>&  inbound,
-    moodycamel::BlockingConcurrentQueue<OutboundMessage>& outbound,
+    moodycamel::BlockingConcurrentQueue<InboundMessage>& inbound,
+    OutboundTable& outbound,
     uint32_t max_connections, size_t fd_table_size, uint16_t port, int pinned_cpu_core)
     : listening_socket_(port),
       max_connections_(max_connections),
@@ -101,9 +101,7 @@ void TcpGateway::stop() {
     }
     if (sender_thread_.joinable()) {
         send_loop_running_.store(false, std::memory_order_relaxed);
-        OutboundMessage sentinel{};
-        sentinel.dest_fd = -1;
-        outbound_.enqueue(std::move(sentinel)); // sentinel: unblocks wait_dequeue_bulk
+        outbound_.dirty.enqueue(-1); // sentinel that unblocks wait_dequeue_bulk in send_loop
         sender_thread_.join();
         spdlog::debug("Sender thread on tcpgateway joined!");
     }
@@ -287,33 +285,33 @@ bool TcpGateway::try_dispatch_frames(const int fd) {
 }
 
 void TcpGateway::send_loop() {
-    static constexpr size_t BATCH   = 32;
+    // Dirty here refers to fds that have pending messages to be sent
+    static constexpr size_t DIRTY_BATCH = 32;
+    int dirty_fds[DIRTY_BATCH];
 
-    OutboundMessage batch[BATCH];
     while (send_loop_running_.load(std::memory_order_relaxed)) {
-        const size_t n = outbound_.wait_dequeue_bulk(batch, BATCH);
+        const size_t n = outbound_.dirty.wait_dequeue_bulk(dirty_fds, DIRTY_BATCH);
         for (size_t i = 0; i < n; ++i) {
+            const int fd = dirty_fds[i];
+            if (fd == -1) continue; // shutdown sentinel
 
-            if (batch[i].dest_fd == -1) {
-                // sentinel: this is a shutdown signal. we still care about the rest of the queue tho so just ignore and finish up
-                continue;
+            // Drain all pending messages from this fd's ring buffer
+            // this does mean that we may get out-of-order delivery across different fds, but messages for the same fd will be in order, which is what matters most
+            while (auto msg = outbound_.queues[fd].pop()) {
+                // Stamp broker->client outbound sequence just before sending it out
+                std::byte* buf_ptr = msg->data();
+                write_sequence({buf_ptr, msg->len}, outbound_seq_[fd].fetch_add(1, std::memory_order_relaxed) + 1);
+                do_send(fd, *msg);
             }
-            // Stamp broker->client outbound sequence just before hitting the wire
-            {
-                std::byte* buf_ptr = batch[i].heap_buf ? batch[i].heap_buf.get() : batch[i].inline_buf.data();
-                write_sequence({buf_ptr, batch[i].len},
-                               outbound_seq_[batch[i].dest_fd].fetch_add(1, std::memory_order_relaxed) + 1);
-            }
-            do_send(batch[i]);
         }
     }
 }
 
-void TcpGateway::do_send(const OutboundMessage& msg) { //NOLINT
+void TcpGateway::do_send(const int fd, const OutboundMessage& msg) { //NOLINT
     const std::byte* ptr = msg.data();
     size_t remaining     = msg.len;
     while (remaining > 0) {
-        const ssize_t sent = send(msg.dest_fd, ptr, remaining, MSG_NOSIGNAL);
+        const ssize_t sent = send(fd, ptr, remaining, MSG_NOSIGNAL);
         if (sent < 0) {
             // EAGAIN: kernel send buffer full we will drop for now (post-MVP: buffer remainder)
             // EBADF/EPIPE/ECONNRESET: fd closed by read thread so discard silently

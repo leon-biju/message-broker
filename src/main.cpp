@@ -15,6 +15,12 @@ extern "C" void handle_signal(int) {
 }
 
 int main() {
+    constexpr uint32_t max_connections = 32;
+    constexpr size_t   fd_table_size = 64; // should be >= max_connections, upper bound for fd indexing
+    constexpr uint16_t port = 9000;
+    constexpr int      gateway_cpu = 1;
+    constexpr int      router_cpu = 2;
+    
     std::signal(SIGINT, handle_signal);
     std::signal(SIGTERM, handle_signal);
 
@@ -26,13 +32,13 @@ int main() {
     spdlog::cfg::load_env_levels();  // respects SPDLOG_LEVEL env var; falls back to debug
     spdlog::set_pattern("[%H:%M:%S.%e] [%^%l%$] [%t] %v");
 
-    moodycamel::BlockingConcurrentQueue<InboundMessage>  inbound_queue;
-    moodycamel::BlockingConcurrentQueue<OutboundMessage> outbound_queue;
-    Router router(inbound_queue, outbound_queue, 2);
+    moodycamel::BlockingConcurrentQueue<InboundMessage> inbound_queue;
+    OutboundTable outbound_table(fd_table_size);
+    Router router(inbound_queue, outbound_table, router_cpu);
 
-    TcpGateway gateway(inbound_queue, outbound_queue, 32, 64, 9000, 1);
+    TcpGateway gateway(inbound_queue, outbound_table, max_connections, fd_table_size, port, gateway_cpu);
     spdlog::info("Starting Message broker port={} max_connections={} gateway_cpu={} router_cpu={}",
-        9000, 32, 1, 2);
+        port, max_connections, gateway_cpu, router_cpu);
 
     router.start();
     gateway.start();

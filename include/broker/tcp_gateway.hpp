@@ -23,9 +23,11 @@
 #include <concurrentqueue.h>
 #include <blockingconcurrentqueue.h>
 #include <broker/protocol.hpp>
+#include <broker/spsc_queue.hpp>
 
-inline constexpr size_t READ_BUF_SIZE    = sizeof(FrameHeader) + MAX_PAYLOAD_LEN;
-inline constexpr size_t CONN_BUF_CAPACITY = 131072; // 128KiB, power of two
+inline constexpr size_t READ_BUF_SIZE       = sizeof(FrameHeader) + MAX_PAYLOAD_LEN;
+inline constexpr size_t CONN_BUF_CAPACITY   = 131072; // 128KiB, power of two
+inline constexpr size_t OUTBOUND_RING_CAPACITY = 256; // slots per subscriber ring buffer, power of two
 
 // Lightweight RAII wrapper for listening socket, probably don't need this tbh, might remove in later versions
 class ListeningSocket {
@@ -91,12 +93,11 @@ struct OutboundMessage {
     std::array<std::byte, INLINE_CAP> inline_buf{};
     std::unique_ptr<std::byte[]> heap_buf{nullptr}; // large buffers 256B+ spill onto the heap
     uint32_t len{0};
-    int      dest_fd{-1};
 
     OutboundMessage() = default;
 
     OutboundMessage(const OutboundMessage& o)
-        : inline_buf(o.inline_buf), len(o.len), dest_fd(o.dest_fd) {
+        : inline_buf(o.inline_buf), len(o.len) {
         if (o.heap_buf) {
             heap_buf = std::make_unique<std::byte[]>(o.len);
             std::memcpy(heap_buf.get(), o.heap_buf.get(), o.len);
@@ -106,7 +107,6 @@ struct OutboundMessage {
         if (this != &o) {
             inline_buf = o.inline_buf;
             len = o.len;
-            dest_fd = o.dest_fd;
             if (o.heap_buf) {
                 heap_buf = std::make_unique<std::byte[]>(o.len);
                 std::memcpy(heap_buf.get(), o.heap_buf.get(), o.len);
@@ -118,6 +118,10 @@ struct OutboundMessage {
     }
     OutboundMessage(OutboundMessage&&) = default;
     OutboundMessage& operator=(OutboundMessage&&) = default;
+
+    [[nodiscard]] std::byte* data() { // If we need to write into the buffer (e.g. for stamping sequence numbers)
+        return heap_buf ? heap_buf.get() : inline_buf.data();
+    }
 
     [[nodiscard]] const std::byte* data() const {
         return heap_buf ? heap_buf.get() : inline_buf.data();
@@ -131,6 +135,20 @@ struct OutboundMessage {
         heap_buf = std::make_unique<std::byte[]>(needed);
         return {heap_buf.get(), needed};
     }
+};
+
+// Owns all per-fd outbound SPSC queues and the dirty-fd notification queue.
+struct OutboundTable {
+    std::unique_ptr<SPSCQueue<OutboundMessage, OUTBOUND_RING_CAPACITY>[]> queues; // indexed by fd    
+    moodycamel::BlockingConcurrentQueue<int> dirty; // Router pushes an fd here after writing to queues[fd]. sender thread blocks on this
+
+
+    explicit OutboundTable(size_t fd_table_size)
+        : queues(std::make_unique<SPSCQueue<OutboundMessage, OUTBOUND_RING_CAPACITY>[]>(fd_table_size))
+    {}
+
+    OutboundTable(const OutboundTable&)            = delete;
+    OutboundTable& operator=(const OutboundTable&) = delete;
 };
 
 // Parses and dispatches all complete frames from conn's buffer into inbound.
@@ -151,8 +169,8 @@ class TcpGateway {
     uint32_t max_connections_;
     int      pinned_cpu_core_;
 
-    moodycamel::BlockingConcurrentQueue<InboundMessage>&  inbound_;
-    moodycamel::BlockingConcurrentQueue<OutboundMessage>& outbound_;
+    moodycamel::BlockingConcurrentQueue<InboundMessage>& inbound_;
+    OutboundTable&                                       outbound_;
 
     std::vector<Connection>            connections;
     std::vector<std::atomic_uint32_t>  consumer_watermark_; // fd-indexed, router stores after consuming
@@ -168,8 +186,8 @@ class TcpGateway {
     std::atomic_bool send_loop_running_ {true}; // Shutdown signal for send loop
 
 public:
-    TcpGateway(moodycamel::BlockingConcurrentQueue<InboundMessage>&  inbound,
-               moodycamel::BlockingConcurrentQueue<OutboundMessage>& outbound,
+    TcpGateway(moodycamel::BlockingConcurrentQueue<InboundMessage>& inbound,
+               OutboundTable& outbound,
                uint32_t max_connections, size_t fd_table_size, uint16_t port, int pinned_cpu_core);
     ~TcpGateway();
     TcpGateway(const TcpGateway&)            = delete;
@@ -197,7 +215,7 @@ private:
 
     // Functions below run on sender thread
     void send_loop();
-    void do_send(const OutboundMessage& msg);
+    void do_send(int fd, const OutboundMessage& msg);
 
 };
 

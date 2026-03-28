@@ -37,8 +37,8 @@ class Router {
         int,
         std::unordered_map<std::string, size_t, StringHash, std::equal_to<>>
     > fd_topic_slot_;
-    moodycamel::BlockingConcurrentQueue<InboundMessage>&  inbound_;
-    moodycamel::BlockingConcurrentQueue<OutboundMessage>& outbound_;
+    moodycamel::BlockingConcurrentQueue<InboundMessage>& inbound_;
+    OutboundTable&                                       outbound_;
 
     std::atomic_bool shutdown_ {false};
 
@@ -46,8 +46,8 @@ class Router {
     int         pinned_cpu_core_;
 public:
     explicit Router(
-            moodycamel::BlockingConcurrentQueue<InboundMessage>&  inbound,
-            moodycamel::BlockingConcurrentQueue<OutboundMessage>& outbound,
+            moodycamel::BlockingConcurrentQueue<InboundMessage>& inbound,
+            OutboundTable& outbound,
             const int pinned_cpu_core
         ): inbound_(inbound), outbound_(outbound), pinned_cpu_core_(pinned_cpu_core) {};
     void start();
