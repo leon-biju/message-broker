@@ -10,11 +10,13 @@
 #include <string_view>
 #include <vector>
 
-using InQ  = moodycamel::BlockingConcurrentQueue<InboundMessage>;
-using OutQ = moodycamel::BlockingConcurrentQueue<OutboundMessage>;
+using InQ = moodycamel::BlockingConcurrentQueue<InboundMessage>;
 
 static constexpr std::chrono::milliseconds MSG_TIMEOUT{200};
 static constexpr std::chrono::milliseconds EMPTY_TIMEOUT{50};
+
+// fd numbers used in tests go up to 99, size the table to cover them
+static constexpr size_t TEST_FD_TABLE_SIZE = 128;
 
 // Reinterpret a string literal's bytes as a byte span (static lifetime so safe as span)
 static std::span<const std::byte> as_bytes(const std::string_view sv) {
@@ -62,30 +64,35 @@ static std::optional<DecodedFrame> decode_outbound(const OutboundMessage& out) {
     return *frame;
 }
 
-// Dequeue up to n messages, each with MSG_TIMEOUT. Returns fewer if the queue stays empty.
-static std::vector<OutboundMessage> drain_n(OutQ& q, size_t n) {
-    std::vector<OutboundMessage> out;
+// Drain up to n messages from the outbound table by consuming dirty notifications
+// and draining each fd's ring buffer. Returns (fd, message) pairs; fewer than n if table stays quiet.
+static std::vector<std::pair<int, OutboundMessage>> drain_n(OutboundTable& tbl, size_t n) {
+    std::vector<std::pair<int, OutboundMessage>> out;
     out.reserve(n);
-    for (size_t i = 0; i < n; ++i) {
-        OutboundMessage msg;
-        if (q.wait_dequeue_timed(msg, MSG_TIMEOUT)) out.push_back(std::move(msg));
-        else break;
+    while (out.size() < n) {
+        int fd;
+        if (!tbl.dirty.wait_dequeue_timed(fd, MSG_TIMEOUT)) break;
+        while (out.size() < n) {
+            auto msg = tbl.queues[fd].pop();
+            if (!msg) break;
+            out.emplace_back(fd, std::move(*msg));
+        }
     }
     return out;
 }
 
-// Returns true if no message arrives within EMPTY_TIMEOUT (queue is quiet)
-static bool queue_empty(OutQ& q) {
-    OutboundMessage msg;
-    return !q.wait_dequeue_timed(msg, EMPTY_TIMEOUT);
+// Returns true if no dirty notification arrives within EMPTY_TIMEOUT (table is quiet)
+static bool queue_empty(OutboundTable& tbl) {
+    int fd;
+    return !tbl.dirty.wait_dequeue_timed(fd, EMPTY_TIMEOUT);
 }
 
 // Test Fixture
 class RouterTest: public ::testing::Test {
 protected:
-    InQ    inbound_;
-    OutQ   outbound_;
-    Router router_{inbound_, outbound_, /*pinned_cpu_core=*/-1};
+    InQ           inbound_;
+    OutboundTable outbound_{TEST_FD_TABLE_SIZE};
+    Router        router_{inbound_, outbound_, /*pinned_cpu_core=*/-1};
 
     void SetUp()    override { router_.start(); }
     void TearDown() override { router_.stop();  }
@@ -104,9 +111,9 @@ TEST_F(RouterTest, FanOut) {
     ASSERT_EQ(msgs.size(), 3u);
 
     std::set<int> dests;
-    for (const auto& out : msgs) {
-        dests.insert(out.dest_fd);
-        auto frame = decode_outbound(out);
+    for (const auto& [fd, msg] : msgs) {
+        dests.insert(fd);
+        auto frame = decode_outbound(msg);
         ASSERT_TRUE(frame.has_value());
         ASSERT_TRUE(std::holds_alternative<PublishMsg>(frame->payload));
         const auto& pub = std::get<PublishMsg>(frame->payload);
@@ -132,7 +139,7 @@ TEST_F(RouterTest, SwapAndPopUnsubscribe) {
     auto msgs = drain_n(outbound_, 2);
     ASSERT_EQ(msgs.size(), 2u);
     std::set<int> dests;
-    for (const auto& out : msgs) dests.insert(out.dest_fd);
+    for (const auto& [fd, msg] : msgs) dests.insert(fd);
     EXPECT_EQ(dests, (std::set<int>{11, 12}));
     EXPECT_TRUE(queue_empty(outbound_));
 
@@ -143,7 +150,7 @@ TEST_F(RouterTest, SwapAndPopUnsubscribe) {
 
     auto msgs2 = drain_n(outbound_, 1);
     ASSERT_EQ(msgs2.size(), 1u);
-    EXPECT_EQ(msgs2[0].dest_fd, 11);
+    EXPECT_EQ(msgs2[0].first, 11);
     EXPECT_TRUE(queue_empty(outbound_));
 }
 
@@ -161,8 +168,8 @@ TEST_F(RouterTest, DisconnectCleansUpAllSubscriptions) {
     // Only fd=6 should receive the publish on a/1; a/2 and a/3 have no subscribers.
     auto msgs = drain_n(outbound_, 1);
     ASSERT_EQ(msgs.size(), 1u);
-    EXPECT_EQ(msgs[0].dest_fd, 6);
-    auto frame = decode_outbound(msgs[0]);
+    EXPECT_EQ(msgs[0].first, 6);
+    auto frame = decode_outbound(msgs[0].second);
     ASSERT_TRUE(frame.has_value());
     ASSERT_TRUE(std::holds_alternative<PublishMsg>(frame->payload));
     EXPECT_EQ(std::get<PublishMsg>(frame->payload).topic, "a/1");
@@ -177,7 +184,7 @@ TEST_F(RouterTest, DuplicateSubscribeIsNoOp) {
 
     auto msgs = drain_n(outbound_, 1);
     ASSERT_EQ(msgs.size(), 1u);
-    EXPECT_EQ(msgs[0].dest_fd, 10);
+    EXPECT_EQ(msgs[0].first, 10);
     EXPECT_TRUE(queue_empty(outbound_));
 }
 
@@ -194,9 +201,9 @@ TEST_F(RouterTest, AckSequencing) {
 
     auto sub_acks = drain_n(outbound_, 1);
     ASSERT_EQ(sub_acks.size(), 1u);
-    EXPECT_EQ(sub_acks[0].dest_fd, 10);
+    EXPECT_EQ(sub_acks[0].first, 10);
     {
-        auto frame = decode_outbound(sub_acks[0]);
+        auto frame = decode_outbound(sub_acks[0].second);
         ASSERT_TRUE(frame.has_value());
         ASSERT_TRUE(std::holds_alternative<AckMsg>(frame->payload));
         EXPECT_EQ(std::get<AckMsg>(frame->payload).acked_seq, 42u);
@@ -209,10 +216,11 @@ TEST_F(RouterTest, AckSequencing) {
     auto pub_msgs = drain_n(outbound_, 2);
     ASSERT_EQ(pub_msgs.size(), 2u);
 
-    const OutboundMessage* ack_out     = nullptr;
-    const OutboundMessage* deliver_out = nullptr;
+    using Delivery = std::pair<int, OutboundMessage>;
+    const Delivery* ack_out     = nullptr;
+    const Delivery* deliver_out = nullptr;
     for (const auto& m : pub_msgs) {
-        auto f = decode_outbound(m);
+        auto f = decode_outbound(m.second);
         ASSERT_TRUE(f.has_value());
         if (std::holds_alternative<AckMsg>(f->payload))     ack_out     = &m;
         if (std::holds_alternative<PublishMsg>(f->payload)) deliver_out = &m;
@@ -221,11 +229,11 @@ TEST_F(RouterTest, AckSequencing) {
     ASSERT_NE(ack_out,     nullptr);
     ASSERT_NE(deliver_out, nullptr);
 
-    EXPECT_EQ(ack_out->dest_fd, 99);
-    auto ack_frame = decode_outbound(*ack_out);
+    EXPECT_EQ(ack_out->first, 99);
+    auto ack_frame = decode_outbound(ack_out->second);
     ASSERT_TRUE(ack_frame.has_value());
     EXPECT_EQ(std::get<AckMsg>(ack_frame->payload).acked_seq, 77u);
 
-    EXPECT_EQ(deliver_out->dest_fd, 10);
+    EXPECT_EQ(deliver_out->first, 10);
     EXPECT_TRUE(queue_empty(outbound_));
 }

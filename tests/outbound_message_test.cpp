@@ -52,8 +52,7 @@ TEST(OutboundMessageSBO, CopyWithHeapBufDeepCopies) {
     OutboundMessage src;
     auto buf = src.write_buf(257);
     std::memset(buf.data(), 0xEE, 257);
-    src.len     = 257;
-    src.dest_fd = 5;
+    src.len = 257;
 
     OutboundMessage dst(src);  // copy constructor
 
