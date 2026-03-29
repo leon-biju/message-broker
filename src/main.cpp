@@ -15,26 +15,31 @@ extern "C" void handle_signal(int) {
 }
 
 int main() {
-    constexpr uint32_t max_connections = 32;
-    constexpr size_t   fd_table_size = 64; // should be >= max_connections, upper bound for fd indexing
-    constexpr uint16_t port = 9000;
-    constexpr int      gateway_cpu = 1;
-    constexpr int      router_cpu = 2;
-    
+
+    // Setup signal handlers so we close sockets and flush logs properly    
     std::signal(SIGINT, handle_signal);
     std::signal(SIGTERM, handle_signal);
     std::signal(SIGHUP, handle_signal);
 
-    // Async logging: simply enqueue from hot-path threads and flush on background thread
+    // Set up async logging: simply enqueue from hot-path threads and this will flush on background thread
     spdlog::init_thread_pool(8192, 1);
     auto logger = spdlog::stdout_color_mt<spdlog::async_factory>("broker");
     spdlog::set_default_logger(logger);
     spdlog::cfg::load_env_levels();  // respects SPDLOG_LEVEL env var; falls back to debug
     spdlog::set_pattern("[%H:%M:%S.%e] [%^%l%$] [%t] %v");
 
+    // Maybe move these to a toml?
+    constexpr uint32_t max_connections = 32;
+    constexpr size_t   fd_table_size = 64; // should be >= max_connections, upper bound for fd indexing
+    constexpr uint16_t port = 9000;
+    constexpr int      gateway_cpu = 1;
+    constexpr int      router_cpu = 2;
+
+    Metrics metrics;
+
     moodycamel::BlockingConcurrentQueue<InboundMessage> inbound_queue;
     OutboundTable outbound_table(fd_table_size);
-    Router router(inbound_queue, outbound_table, router_cpu);
+    Router router(inbound_queue, outbound_table, metrics, router_cpu);
 
     TcpGateway gateway(inbound_queue, outbound_table, max_connections, fd_table_size, port, gateway_cpu);
     spdlog::info("Starting Message broker port={} max_connections={} gateway_cpu={} router_cpu={}",

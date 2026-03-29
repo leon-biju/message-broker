@@ -101,8 +101,12 @@ public:
         queue_depth_cache_.erase(it);
     }
 
-    void on_subscriber_added()   { subscriber_count_.Increment(); }
-    void on_subscriber_removed() { subscriber_count_.Decrement(); }
+    void on_subscriber_added() {
+        subscriber_count_.Increment();
+    }
+    void on_subscriber_removed() {
+        subscriber_count_.Decrement();
+    }
 
 private:
     // If counter exists in cache return it, otherwise create it and cache it before returning reference

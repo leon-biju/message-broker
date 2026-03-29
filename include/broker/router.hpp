@@ -53,7 +53,7 @@ public:
             moodycamel::BlockingConcurrentQueue<InboundMessage>& inbound,
             OutboundTable& outbound,
             Metrics& metrics,
-            const int pinned_cpu_core
+            int pinned_cpu_core
         ): inbound_(inbound), outbound_(outbound), metrics_(metrics), pinned_cpu_core_(pinned_cpu_core) {};
     void start();
     void stop();
