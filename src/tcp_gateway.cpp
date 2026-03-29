@@ -297,7 +297,7 @@ void TcpGateway::send_loop() {
 
             // Drain all pending messages from this fd's ring buffer
             // this does mean that we may get out-of-order delivery across different fds, but messages for the same fd will be in order, which is what matters most
-            while (auto msg = outbound_.queues[fd].pop()) {
+            while (auto msg = outbound_.queues[fd].try_dequeue()) {
                 // Stamp broker->client outbound sequence just before sending it out
                 std::byte* buf_ptr = msg->data();
                 write_sequence({buf_ptr, msg->len}, outbound_seq_[fd].fetch_add(1, std::memory_order_relaxed) + 1);

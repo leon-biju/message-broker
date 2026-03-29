@@ -39,7 +39,7 @@ public:
 
     ~SPSCQueue() = default;
 
-    bool push(T val) {
+    bool try_enqueue(T val) {
         const auto tail = producer_.tail.load(std::memory_order_relaxed);
 
         // Check against cached head first and only if it looks full cross the cache boundary and check the actual head
@@ -56,7 +56,7 @@ public:
         return true;
     }
 
-    std::optional<T> pop() {
+    std::optional<T> try_dequeue() {
         const auto head = consumer_.head.load(std::memory_order_relaxed);
 
         // Check against cached tail first and only if it looks full cross the cache boundary and check the actual tail

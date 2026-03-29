@@ -73,7 +73,7 @@ static std::vector<std::pair<int, OutboundMessage>> drain_n(OutboundTable& tbl, 
         int fd;
         if (!tbl.dirty.wait_dequeue_timed(fd, MSG_TIMEOUT)) break;
         while (out.size() < n) {
-            auto msg = tbl.queues[fd].pop();
+            auto msg = tbl.queues[fd].try_dequeue();
             if (!msg) break;
             out.emplace_back(fd, std::move(*msg));
         }
