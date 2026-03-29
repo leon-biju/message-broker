@@ -12,8 +12,8 @@
 
 using InQ = moodycamel::BlockingConcurrentQueue<InboundMessage>;
 
-static constexpr std::chrono::milliseconds MSG_TIMEOUT{200};
-static constexpr std::chrono::milliseconds EMPTY_TIMEOUT{50};
+static constexpr std::chrono::milliseconds MSG_TIMEOUT{20};
+static constexpr std::chrono::milliseconds EMPTY_TIMEOUT{10};
 
 // fd numbers used in tests go up to 99, size the table to cover them
 static constexpr size_t TEST_FD_TABLE_SIZE = 128;
