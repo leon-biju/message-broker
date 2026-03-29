@@ -23,9 +23,9 @@ int main() {
     
     std::signal(SIGINT, handle_signal);
     std::signal(SIGTERM, handle_signal);
+    std::signal(SIGHUP, handle_signal);
 
     // Async logging: simply enqueue from hot-path threads and flush on background thread
-    // TODO: add a file sink (rotating) alongside the console sink
     spdlog::init_thread_pool(8192, 1);
     auto logger = spdlog::stdout_color_mt<spdlog::async_factory>("broker");
     spdlog::set_default_logger(logger);
