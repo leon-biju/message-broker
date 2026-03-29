@@ -21,14 +21,16 @@
 #include <concurrentqueue.h>
 
 #include <broker/tcp_gateway.hpp>
+#include <broker/metrics.hpp>
 
-struct StringHash {
-    // Single string_view overload covers string, const char*, and string literals
-    using is_transparent = void;
-    size_t operator()(const std::string_view sv) const { return std::hash<std::string_view>{}(sv); }
-};
 
 class Router {
+    struct StringHash { // So we can look up easily with string_views as well without constructing std::strings
+        using is_transparent = void;
+        size_t operator()(std::string_view sv) const noexcept {
+            return std::hash<std::string_view>{}(sv);
+        }
+    };
     // Used for sending out messages to subscribers
     std::unordered_map<std::string, std::vector<int>, StringHash, std::equal_to<>> topic_subscribers_;
 
@@ -40,6 +42,8 @@ class Router {
     moodycamel::BlockingConcurrentQueue<InboundMessage>& inbound_;
     OutboundTable&                                       outbound_;
 
+    Metrics&                                             metrics_;
+
     std::atomic_bool shutdown_ {false};
 
     std::thread worker_;
@@ -48,8 +52,9 @@ public:
     explicit Router(
             moodycamel::BlockingConcurrentQueue<InboundMessage>& inbound,
             OutboundTable& outbound,
+            Metrics& metrics,
             const int pinned_cpu_core
-        ): inbound_(inbound), outbound_(outbound), pinned_cpu_core_(pinned_cpu_core) {};
+        ): inbound_(inbound), outbound_(outbound), metrics_(metrics), pinned_cpu_core_(pinned_cpu_core) {};
     void start();
     void stop();
 

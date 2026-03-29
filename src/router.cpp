@@ -62,6 +62,7 @@ void Router::handle_subscribe(const int fd, const SubscribeMsg& msg, const Frame
         auto& subs = topic_subscribers_[std::string(msg.topic)];  // creates vec if absent
         subscribed_map.emplace(msg.topic, subs.size());
         subs.push_back(fd);
+        metrics_.on_subscriber_added();
         spdlog::debug("fd={} subscribed topic={}", fd, msg.topic);
     }
 
@@ -94,12 +95,14 @@ void Router::handle_unsubscribe(const int fd, const UnsubscribeMsg& msg, const F
                     topic_subscribers_.erase(topic_it);
                 }
             }
+            metrics_.on_subscriber_removed();
             spdlog::debug("fd={} unsubscribed topic={}", fd, msg.topic);
         }
     }
 
-    if (!has_flag(header.flags, Flags::NO_ACK))
+    if (!has_flag(header.flags, Flags::NO_ACK)) {
         enqueue_ack(fd, header.sequence);
+    }
 }
 
 void Router::handle_publish(const int sender_fd, const PublishMsg& msg, const FrameHeader& header) {
@@ -116,8 +119,10 @@ void Router::handle_publish(const int sender_fd, const PublishMsg& msg, const Fr
             for (const int fd : it->second) {
                 if (outbound_.queues[fd].try_enqueue(out)) {
                     outbound_.dirty.enqueue(fd); //tells gateway sender thread to check this fd's queue
+                    metrics_.set_queue_depth(fd, outbound_.queues[fd].approx_size());
                 } else {
                     // Ring buffer full so just  drop message for this subscriber (backpressure)
+                    metrics_.on_dropped(msg.topic);
                     spdlog::warn("fd={} outbound ring full, dropping publish topic={}", fd, msg.topic);
                 }
             }
@@ -128,6 +133,7 @@ void Router::handle_publish(const int sender_fd, const PublishMsg& msg, const Fr
         enqueue_ack(sender_fd, header.sequence);
     }
 
+    metrics_.on_published(msg.topic);
     spdlog::debug("fd={} publish topic={} payload_bytes={} subscribers={}",
         sender_fd, msg.topic, msg.body.size(), subscriber_count);
 }
@@ -157,6 +163,8 @@ void Router::handle_disconnect(const int fd) {
     }
 
     fd_topic_slot_.erase(fd_it);
+
+    metrics_.remove_fd(fd);
 
     spdlog::debug("fd={} disconnected, removed from {} topics", fd, topic_count);
 }
