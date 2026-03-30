@@ -1,0 +1,7 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: 'message-broker'
+    static_configs:
+      - targets: ['host.docker.internal:9090']
