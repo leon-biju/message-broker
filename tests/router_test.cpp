@@ -92,7 +92,8 @@ class RouterTest: public ::testing::Test {
 protected:
     InQ           inbound_;
     OutboundTable outbound_{TEST_FD_TABLE_SIZE};
-    Router        router_{inbound_, outbound_, /*pinned_cpu_core=*/-1};
+    Metrics       metrics_{"0.0.0.0:19090"};
+    Router        router_{inbound_, outbound_, metrics_, /*pinned_cpu_core=*/-1};
 
     void SetUp()    override { router_.start(); }
     void TearDown() override { router_.stop();  }
