@@ -60,9 +60,10 @@ void Router::handle_subscribe(const int fd, const SubscribeMsg& msg, const Frame
 
     if (!subscribed_map.contains(msg.topic)) {
         auto& subs = topic_subscribers_[std::string(msg.topic)];  // creates vec if absent
+        if (subs.empty()) metrics_.on_topic_added();
         subscribed_map.emplace(msg.topic, subs.size());
         subs.push_back(fd);
-        metrics_.on_subscriber_added();
+        metrics_.on_subscribe(msg.topic);
         spdlog::debug("fd={} subscribed topic={}", fd, msg.topic);
     }
 
@@ -93,9 +94,10 @@ void Router::handle_unsubscribe(const int fd, const UnsubscribeMsg& msg, const F
 
                 if (subs.empty()) {
                     topic_subscribers_.erase(topic_it);
+                    metrics_.on_topic_removed();
                 }
             }
-            metrics_.on_subscriber_removed();
+            metrics_.on_unsubscribe(msg.topic);
             spdlog::debug("fd={} unsubscribed topic={}", fd, msg.topic);
         }
     }
@@ -118,10 +120,10 @@ void Router::handle_publish(const int sender_fd, const PublishMsg& msg, const Fr
             out.len = *result;
             for (const int fd : it->second) {
                 if (outbound_.queues[fd].try_enqueue(out)) {
-                    outbound_.dirty.enqueue(fd); //tells gateway sender thread to check this fd's queue
+                    outbound_.dirty.enqueue(fd);
+                    metrics_.on_delivered(msg.topic);
                     metrics_.set_queue_depth(fd, outbound_.queues[fd].approx_size());
                 } else {
-                    // Ring buffer full so just  drop message for this subscriber (backpressure)
                     metrics_.on_dropped(msg.topic);
                     spdlog::warn("fd={} outbound ring full, dropping publish topic={}", fd, msg.topic);
                 }
@@ -133,7 +135,7 @@ void Router::handle_publish(const int sender_fd, const PublishMsg& msg, const Fr
         enqueue_ack(sender_fd, header.sequence);
     }
 
-    metrics_.on_published(msg.topic);
+    metrics_.on_publish_request(msg.topic);
     spdlog::debug("fd={} publish topic={} payload_bytes={} subscribers={}",
         sender_fd, msg.topic, msg.body.size(), subscriber_count);
 }
@@ -146,9 +148,7 @@ void Router::handle_disconnect(const int fd) {
 
     for (auto& [topic, slot] : fd_it->second) {
         const auto topic_it = topic_subscribers_.find(topic);
-        if (topic_it == topic_subscribers_.end()) {
-            continue;
-        }
+        if (topic_it == topic_subscribers_.end()) continue;
 
         auto& subs = topic_it->second;
         std::swap(subs[slot], subs.back());
@@ -157,8 +157,11 @@ void Router::handle_disconnect(const int fd) {
         if (slot < subs.size()) {
             fd_topic_slot_[subs[slot]][topic] = slot;
         }
+
+        metrics_.on_unsubscribe(topic);
         if (subs.empty()) {
             topic_subscribers_.erase(topic_it);
+            metrics_.on_topic_removed();
         }
     }
 

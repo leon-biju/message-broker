@@ -22,6 +22,7 @@
 
 #include <concurrentqueue.h>
 #include <blockingconcurrentqueue.h>
+#include <broker/metrics.hpp>
 #include <broker/protocol.hpp>
 #include <broker/spsc_queue.hpp>
 
@@ -171,6 +172,7 @@ class TcpGateway {
 
     moodycamel::BlockingConcurrentQueue<InboundMessage>& inbound_;
     OutboundTable&                                       outbound_;
+    Metrics&                                             metrics_;
 
     std::vector<Connection>            connections;
     std::vector<std::atomic_uint32_t>  consumer_watermark_; // fd-indexed, router stores after consuming
@@ -188,6 +190,7 @@ class TcpGateway {
 public:
     TcpGateway(moodycamel::BlockingConcurrentQueue<InboundMessage>& inbound,
                OutboundTable& outbound,
+               Metrics& metrics,
                uint32_t max_connections, size_t fd_table_size, uint16_t port, int pinned_cpu_core);
     ~TcpGateway();
     TcpGateway(const TcpGateway&)            = delete;

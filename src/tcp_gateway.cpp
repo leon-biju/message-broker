@@ -43,12 +43,14 @@ static ErrorCode parse_error_to_error_code(const ParseError e) {
 TcpGateway::TcpGateway(
     moodycamel::BlockingConcurrentQueue<InboundMessage>& inbound,
     OutboundTable& outbound,
+    Metrics& metrics,
     uint32_t max_connections, size_t fd_table_size, uint16_t port, int pinned_cpu_core)
     : listening_socket_(port),
       max_connections_(max_connections),
       pinned_cpu_core_(pinned_cpu_core),
       inbound_(inbound),
       outbound_(outbound),
+      metrics_(metrics),
       consumer_watermark_(fd_table_size),
       outbound_seq_(fd_table_size),
       connections(fd_table_size)
@@ -159,6 +161,7 @@ void TcpGateway::handle_accept() {
         if (active_connections_count_ >= max_connections_) {
             spdlog::warn("max connections reached ({}/{}), rejecting fd={}",
                 active_connections_count_, max_connections_, client_fd);
+            metrics_.on_connection_rejected();
             close(client_fd);
             continue;
         }
@@ -173,6 +176,7 @@ void TcpGateway::handle_accept() {
         consumer_watermark_[client_fd].store(0, std::memory_order_relaxed);
         outbound_seq_[client_fd].store(0, std::memory_order_relaxed);
         ++active_connections_count_;
+        metrics_.on_connection_accepted();
 
         epoll_event ev{};
         ev.events  = EPOLLIN | EPOLLET;
@@ -223,6 +227,7 @@ void TcpGateway::handle_read(const int fd) {
         }
 
         conn.write_pos += static_cast<uint32_t>(n);
+        metrics_.on_bytes_received(static_cast<size_t>(n));
         if (!try_dispatch_frames(fd)) return;
     }
 }
@@ -276,8 +281,10 @@ std::optional<ParseError> dispatch_frames_impl(
 bool TcpGateway::try_dispatch_frames(const int fd) {
     const auto err = dispatch_frames_impl(fd, connections[fd], inbound_, consumer_watermark_[fd]);
     if (err) {
-        spdlog::debug("fd={} parse error: {}, disconnecting", fd, parse_error_str(*err));
-        send_error_direct(fd, parse_error_to_error_code(*err), parse_error_str(*err));
+        const auto reason = parse_error_str(*err);
+        spdlog::debug("fd={} parse error: {}, disconnecting", fd, reason);
+        metrics_.on_parse_error(reason);
+        send_error_direct(fd, parse_error_to_error_code(*err), reason);
         handle_close(fd);
         return false;
     }
@@ -317,6 +324,7 @@ void TcpGateway::do_send(const int fd, const OutboundMessage& msg) { //NOLINT
             // EBADF/EPIPE/ECONNRESET: fd closed by read thread so discard silently
             return;
         }
+        metrics_.on_bytes_sent(static_cast<size_t>(sent));
         ptr       += static_cast<size_t>(sent);
         remaining -= static_cast<size_t>(sent);
     }
@@ -356,5 +364,6 @@ void TcpGateway::handle_close(const int fd) {
     epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
     connections[fd].active = false;
     --active_connections_count_;
+    metrics_.on_connection_closed();
     close(fd);
 }

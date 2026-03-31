@@ -41,7 +41,7 @@ int main() {
     OutboundTable outbound_table(fd_table_size);
     Router router(inbound_queue, outbound_table, metrics, router_cpu);
 
-    TcpGateway gateway(inbound_queue, outbound_table, max_connections, fd_table_size, port, gateway_cpu);
+    TcpGateway gateway(inbound_queue, outbound_table, metrics, max_connections, fd_table_size, port, gateway_cpu);
     spdlog::info("Starting Message broker port={} max_connections={} gateway_cpu={} router_cpu={}",
         port, max_connections, gateway_cpu, router_cpu);
 
