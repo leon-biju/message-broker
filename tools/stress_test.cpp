@@ -7,7 +7,7 @@
  * Optional connection churn threads cycle connect/subscribe/receive/disconnect
  *
  * Publishers embed timestamp in payload so subscribers can measure
- * end-to-end latency (same-host assumption — both use steady_clock).
+ * end-to-end latency (same-host assumption, both use steady_clock).
  *
  * Usage: ./stress_test <host> <port> <config.toml>
  */
@@ -290,7 +290,7 @@ static void run_subscriber(const StressConfig& cfg, const SubConfig& sub_cfg, Su
         state.per_topic[topic] = {};
     }
 
-    // Receive loop — decode topic + embedded metadata from each PUBLISH
+    // Receive loop: decode topic + embedded metadata from each PUBLISH
     std::array<std::byte, sizeof(FrameHeader) + MAX_PAYLOAD_LEN> recv_buf{};
 
     while (g_running.load(std::memory_order_relaxed)) {
@@ -349,7 +349,6 @@ static void run_subscriber(const StressConfig& cfg, const SubConfig& sub_cfg, Su
     state.fd = -1;
 }
 
-//  Churn thread
 
 static void run_churn(const StressConfig& cfg, const ChurnConfig& churn_cfg, ChurnState& state) {
     std::array<std::byte, sizeof(FrameHeader) + MAX_PAYLOAD_LEN> recv_buf{};
@@ -550,15 +549,13 @@ static StressConfig load_config(std::string_view path, std::string host, uint16_
     // Connection budget validation
     const size_t total_conns = cfg.publishers.size() + cfg.subscribers.size() +
                                (cfg.churn.enabled ? static_cast<size_t>(cfg.churn.connections) : 0);
-    // Just warn — the broker config may have been bumped
+    // Just warn, the broker config may have been bumped
     if (total_conns > 64) {
         std::println(stderr, "Warning: {} total connections requested (check broker max_connections)", total_conns);
     }
 
     return cfg;
 }
-
-//  Main
 
 int main(int argc, char* argv[]) {
     if (argc != 4) {
