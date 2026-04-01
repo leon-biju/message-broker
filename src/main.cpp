@@ -28,7 +28,7 @@ int main(int argc, char* argv[]) {
     spdlog::init_thread_pool(8192, 1);
     auto logger = spdlog::stdout_color_mt<spdlog::async_factory>("broker");
     spdlog::set_default_logger(logger);
-    spdlog::cfg::load_env_levels();  // respects SPDLOG_LEVEL env var; falls back to debug
+    spdlog::cfg::load_env_levels();  // follow SPDLOG_LEVEL env var -- defaults to debug if not set
     spdlog::set_pattern("[%H:%M:%S.%e] [%^%l%$] [%t] %v");
 
     // Defaults
@@ -43,7 +43,7 @@ int main(int argc, char* argv[]) {
         try {
             const auto tbl = toml::parse_file(argv[1]);
             if (auto v = tbl["port"].value<int>())             port            = static_cast<uint16_t>(*v);
-            if (auto v = tbl["max_connections"].value<int>())  max_connections  = static_cast<uint32_t>(*v);
+            if (auto v = tbl["max_connections"].value<int>())  max_connections = static_cast<uint32_t>(*v);
             if (auto v = tbl["fd_table_size"].value<int>())    fd_table_size   = static_cast<size_t>(*v);
             if (auto v = tbl["gateway_cpu"].value<int>())      gateway_cpu     = *v;
             if (auto v = tbl["router_cpu"].value<int>())       router_cpu      = *v;
