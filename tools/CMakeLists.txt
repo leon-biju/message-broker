@@ -12,4 +12,5 @@ target_link_libraries(subscriber PRIVATE broker_lib)
 
 # Load generator — multi-publisher/subscriber benchmark with latency histogram
 add_executable(load_gen load_gen.cpp)
-target_link_libraries(load_gen PRIVATE broker_lib tomlplusplus::tomlplusplus)
+target_link_libraries(load_gen PRIVATE broker_lib)
+
