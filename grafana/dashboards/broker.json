@@ -134,8 +134,8 @@
       "id": 8,
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
-        { "expr": "rate(bytes_received_total[15s])", "legendFormat": "rx", "refId": "A" },
-        { "expr": "rate(bytes_sent_total[15s])", "legendFormat": "tx", "refId": "B" }
+        { "expr": "rate(bytes_received_total[15s])", "legendFormat": "received", "refId": "A" },
+        { "expr": "rate(bytes_sent_total[15s])", "legendFormat": "sent", "refId": "B" }
       ],
       "title": "Network Throughput",
       "type": "timeseries"
