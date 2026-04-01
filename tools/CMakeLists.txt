@@ -14,3 +14,6 @@ target_link_libraries(subscriber PRIVATE broker_lib)
 add_executable(load_gen load_gen.cpp)
 target_link_libraries(load_gen PRIVATE broker_lib)
 
+# Stress test — multi-topic, multi-subscription load generator with churn
+add_executable(stress_test stress_test.cpp)
+target_link_libraries(stress_test PRIVATE broker_lib)

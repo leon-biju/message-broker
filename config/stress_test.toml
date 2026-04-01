@@ -1,0 +1,53 @@
+topics = ["market/aapl", "market/msft", "market/goog", "orders/fill", "orders/cancel"]
+
+[general]
+warmup_secs  = 10
+measure_secs = 60
+
+# PUBLISHERS 
+# Each [[publisher]] = one TCP connection = one thread.
+# Round-robins across its topic list.
+# payload_bytes minimum = 24 (metadata overhead for e2e latency)
+
+[[publisher]]
+topics        = ["market/aapl"]
+payload_bytes = 64
+rate_hz       = 5000
+
+[[publisher]]
+topics        = ["market/msft"]
+payload_bytes = 64
+rate_hz       = 5000
+
+[[publisher]]
+topics        = ["market/goog", "orders/fill"]
+payload_bytes = 224
+rate_hz       = 2000
+
+[[publisher]]
+topics        = ["orders/cancel"]
+payload_bytes = 4096
+rate_hz       = 500
+
+# SUBSCRIBERS 
+# Each [[subscriber]] = one TCP connection = one thread.
+# Subscribes to ALL topics in its list on a single connection.
+
+[[subscriber]]
+topics = ["market/aapl", "market/msft", "market/goog"]
+
+[[subscriber]]
+topics = ["market/aapl"]
+
+[[subscriber]]
+topics = ["orders/fill", "orders/cancel"]
+
+[[subscriber]]
+topics = ["market/aapl", "market/msft", "market/goog", "orders/fill", "orders/cancel"]
+
+# Connection Churn (optional) 
+[churn]
+enabled          = false
+connections      = 2
+interval_ms      = 500
+subscribe_topics = ["market/aapl"]
