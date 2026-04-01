@@ -1,6 +1,6 @@
 topic            = "test/topic"
-publisher_count  = 4
-subscriber_count = 2
+publisher_count  = 8
+subscriber_count = 16
 warmup_secs      = 2
 measure_secs     = 10
 max_throughput   = true
