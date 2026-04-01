@@ -44,7 +44,7 @@ target_link_libraries(broker_lib PUBLIC
 
 # Main executable
 add_executable(broker src/main.cpp)
-target_link_libraries(broker PRIVATE broker_lib)
+target_link_libraries(broker PRIVATE broker_lib tomlplusplus::tomlplusplus)
 
 
 # Tools and tests TODO

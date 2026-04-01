@@ -1,0 +1,5 @@
+port             = 9000
+max_connections  = 64
+fd_table_size    = 128    # should be >= max_connections
+gateway_cpu      = 1
+router_cpu       = 2
