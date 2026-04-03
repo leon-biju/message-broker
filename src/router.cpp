@@ -38,6 +38,8 @@ void Router::run_loop() {
     while (!shutdown_.load(std::memory_order_relaxed)) {
         const size_t n = inbound_.wait_dequeue_bulk(msgs, BATCH_SIZE);
 
+        // Consume all messages here
+        // After this loop, we don't need the buffers that the messages point to anymore, so it's safe for the gateway to do whatever with it.
         for (size_t i = 0; i < n; ++i) {
             std::visit([&](auto& payload) {
                 using T = std::decay_t<decltype(payload)>;
@@ -47,10 +49,13 @@ void Router::run_loop() {
                 else if constexpr (std::is_same_v<T, DisconnectMsg>)  handle_disconnect (msgs[i].sender_fd);
                 // ignore the shutdown message since we want to drain the queue anyway
             }, msgs[i].frame.payload);
+        }
 
-            // Signal receiver that we're done with this message's buffer region
-            if (msgs[i].watermark_ptr)
+        // Since all the batch have been consumed, we can safely update the watermarks
+        for (size_t i = 0; i < n; ++i) {
+            if (msgs[i].watermark_ptr) {
                 msgs[i].watermark_ptr->store(msgs[i].consumed_up_to, std::memory_order_release);
+            }
         }
     }
 }
