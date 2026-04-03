@@ -1,0 +1,18 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "perf",
+      "binaryDir": "${sourceDir}/cmake-build-perf",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-fno-omit-frame-pointer"
+      }
+    }
+  ]
+}
