@@ -55,7 +55,7 @@ All encoding and decoding is zero-allocation. Callers provide pre-allocated `std
 # Clone and build (release mode)
 git clone <repo-url>
 
-cmake -S . -B cmake-build-release -DCMAKE_BUILD_TYPE=Release
+cmake --preset release
 cmake --build cmake-build-release
 ```
 
@@ -76,10 +76,10 @@ Binaries are emitted to the build directory:
 
 ```bash
 # Default settings (port 9000)
-./cmake-build-debug/broker
+./cmake-build-release/broker
 
 # With TOML config (port, CPU pinning, connection limits)
-./cmake-build-debug/broker config/broker.toml
+./cmake-build-release/broker config/broker.toml
 ```
 
 
@@ -87,13 +87,13 @@ Binaries are emitted to the build directory:
 
 ```bash
 # Terminal 1: start broker
-./cmake-build-debug/broker config/broker.toml
+./cmake-build-release/broker config/broker.toml
 
 # Terminal 2: subscribe to a topic
-./cmake-build-debug/subscriber 127.0.0.1 9000 market/aapl
+./cmake-build-release/subscriber 127.0.0.1 9000 market/aapl
 
 # Terminal 3: publish at 10k msg/s
-./cmake-build-debug/publisher 127.0.0.1 9000 market/aapl 10000
+./cmake-build-release/publisher 127.0.0.1 9000 market/aapl 10000
 ```
 
 ---
@@ -127,7 +127,7 @@ GRAFANA_ADMIN_USER=admin GRAFANA_ADMIN_PASSWORD=admin docker compose up -d
 ## Tests
 
 ```bash
-./cmake-build-debug/tests/broker_tests
+./cmake-build-release/tests/broker_tests
 ```
 
 The test suite covers protocol encoding/decoding (all message types, all error paths, flag validation, layout assertions), router subscription logic, outbound message dispatch, and TCP gateway integration.
