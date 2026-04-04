@@ -51,8 +51,8 @@ TcpGateway::TcpGateway(
       inbound_(inbound),
       outbound_(outbound),
       metrics_(metrics),
-      outbound_seq_(fd_table_size),
-      connections(fd_table_size)
+      connections(fd_table_size),
+      outbound_seq_(fd_table_size)
 {
 
     epoll_fd_ = epoll_create1(EPOLL_CLOEXEC);
