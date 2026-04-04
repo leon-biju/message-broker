@@ -105,7 +105,6 @@ enum class EncodeError {
  * 20 - 23: reserved1         (zero on send, ignore on receive)
  */
 
-#pragma pack(push, 1)
 struct FrameHeader {
     uint16_t    magic;           // must equal MAGIC
     uint8_t     version;         // must equal PROTO_VERSION
@@ -116,10 +115,8 @@ struct FrameHeader {
     uint32_t    payload_len;
     uint8_t     reserved1[4];    // pad rest of header to 24 bytes; todo: CRC32 Checksum here
 };
-#pragma pack(pop)
 
 static_assert(sizeof(FrameHeader) == 24, "bro frame header must be 24B");
-static_assert(alignof(FrameHeader) == 1);
 
 /*  Payload Layouts depending on MessageType
  *  SUBSCRIBE/UNSUBSCRIBE:
@@ -229,8 +226,13 @@ inline void write_sequence(const std::span<std::byte> frame, const uint64_t seq)
         .version     = PROTO_VERSION,
         .type        = std::to_underlying(type),
         .flags       = std::to_underlying(Flags::NONE),
+
+        // shuts up compiler and disappears basically at -O3
+        .reserved0   = {},
+
         .sequence    = seq,
         .payload_len = payload_len,
+        .reserved1   = {}
     };
 
     auto* ptr = buf.data();
@@ -270,8 +272,13 @@ inline void write_sequence(const std::span<std::byte> frame, const uint64_t seq)
         .version     = PROTO_VERSION,
         .type        = std::to_underlying(MessageType::PUBLISH),
         .flags       = std::to_underlying(flags),
+
+        // shuts up compiler and disappears basically at -O3
+        .reserved0   = {},
+
         .sequence    = seq,
         .payload_len = payload_len,
+        .reserved1   = {}
     };
 
     auto* ptr = buf.data();
@@ -305,8 +312,13 @@ inline void write_sequence(const std::span<std::byte> frame, const uint64_t seq)
         .version     = PROTO_VERSION,
         .type        = std::to_underlying(MessageType::ACK),
         .flags       = std::to_underlying(Flags::NONE),
+
+        // shuts up compiler and disappears basically at -O3
+        .reserved0   = {},
+
         .sequence    = seq,
-        .payload_len = payload_len
+        .payload_len = payload_len,
+        .reserved1   = {}
     };
 
     auto* ptr = buf.data();
@@ -339,8 +351,13 @@ inline void write_sequence(const std::span<std::byte> frame, const uint64_t seq)
         .version     = PROTO_VERSION,
         .type        = std::to_underlying(MessageType::ERROR),
         .flags       = std::to_underlying(Flags::NONE),
+
+        // shuts up compiler and disappears basically at -O3
+        .reserved0   = {},
+        
         .sequence    = seq,
-        .payload_len = payload_len
+        .payload_len = payload_len,
+        .reserved1   = {}
     };
 
     auto* ptr = buf.data();
