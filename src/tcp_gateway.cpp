@@ -51,7 +51,6 @@ TcpGateway::TcpGateway(
       inbound_(inbound),
       outbound_(outbound),
       metrics_(metrics),
-      consumer_watermark_(fd_table_size),
       outbound_seq_(fd_table_size),
       connections(fd_table_size)
 {
@@ -171,9 +170,8 @@ void TcpGateway::handle_accept() {
 
         auto& conn = connections[client_fd];
         conn = Connection{};
-        conn.buf = std::make_unique<std::byte[]>(CONN_BUF_CAPACITY);
+        conn.buf_state = std::make_shared<BufferState>();
         conn.active = true;
-        consumer_watermark_[client_fd].store(0, std::memory_order_relaxed);
         outbound_seq_[client_fd].store(0, std::memory_order_relaxed);
         ++active_connections_count_;
         metrics_.on_connection_accepted();
@@ -189,21 +187,22 @@ void TcpGateway::handle_accept() {
     }
 }
 
-void compact_if_needed(Connection& conn, std::atomic<uint32_t>& watermark) {
-    const uint32_t wm = watermark.load(std::memory_order_acquire);
+void compact_if_needed(Connection& conn) {
+    const uint32_t wm = conn.buf_state->watermark.load(std::memory_order_acquire);
     if (wm > 0) {
         const uint32_t remaining = conn.write_pos - wm;
-        if (remaining > 0)
-            std::memmove(conn.buf.get(), conn.buf.get() + wm, remaining);
+        if (remaining > 0) {
+            std::memmove(conn.buf_state->buf.get(), conn.buf_state->buf.get() + wm, remaining);
+        }
         conn.write_pos -= wm;
         conn.parse_pos -= wm;
-        watermark.store(0, std::memory_order_relaxed);
+        conn.buf_state->watermark.store(0, std::memory_order_relaxed);
     }
 }
 
 void TcpGateway::handle_read(const int fd) {
     Connection& conn = connections[fd];
-    compact_if_needed(conn, consumer_watermark_[fd]);
+    compact_if_needed(conn);
 
     while (true) {
         const size_t space = CONN_BUF_CAPACITY - conn.write_pos;
@@ -213,7 +212,7 @@ void TcpGateway::handle_read(const int fd) {
             return;
         }
 
-        const ssize_t n = recv(fd, conn.buf.get() + conn.write_pos, space, 0);
+        const ssize_t n = recv(fd, conn.buf_state->buf.get() + conn.write_pos, space, 0);
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
             spdlog::info("fd={} recv error: {}, disconnecting", fd, strerror(errno));
@@ -234,8 +233,7 @@ void TcpGateway::handle_read(const int fd) {
 
 std::optional<ParseError> dispatch_frames_impl(
     const int fd, Connection& conn,
-    moodycamel::BlockingConcurrentQueue<InboundMessage>& inbound,
-    std::atomic<uint32_t>& watermark)
+    moodycamel::BlockingConcurrentQueue<InboundMessage>& inbound)
 {
     while (true) {
         const uint32_t available = conn.write_pos - conn.parse_pos;
@@ -244,7 +242,7 @@ std::optional<ParseError> dispatch_frames_impl(
             if (available < sizeof(FrameHeader)) break;
 
             const auto raw = std::span<const std::byte, sizeof(FrameHeader)>(
-                conn.buf.get() + conn.parse_pos, sizeof(FrameHeader));
+                conn.buf_state->buf.get() + conn.parse_pos, sizeof(FrameHeader));
             const auto result = parse_header(raw);
             if (!result) {
                 return result.error();
@@ -257,7 +255,7 @@ std::optional<ParseError> dispatch_frames_impl(
             const uint32_t total = sizeof(FrameHeader) + conn.cached_header.payload_len;
             if (available < total) break;
 
-            auto payload = std::span(conn.buf.get() + conn.parse_pos + sizeof(FrameHeader),
+            auto payload = std::span(conn.buf_state->buf.get() + conn.parse_pos + sizeof(FrameHeader),
                                      conn.cached_header.payload_len);
             auto frame = decode_frame(conn.cached_header, payload);
             if (frame) {
@@ -267,7 +265,7 @@ std::optional<ParseError> dispatch_frames_impl(
                 inbound.enqueue(InboundMessage{
                     .frame = *frame,
                     .sender_fd = fd,
-                    .watermark_ptr = &watermark,
+                    .buf_state = conn.buf_state,
                     .consumed_up_to = conn.parse_pos
                 });
             } else {
@@ -279,7 +277,7 @@ std::optional<ParseError> dispatch_frames_impl(
 }
 
 bool TcpGateway::try_dispatch_frames(const int fd) {
-    const auto err = dispatch_frames_impl(fd, connections[fd], inbound_, consumer_watermark_[fd]);
+    const auto err = dispatch_frames_impl(fd, connections[fd], inbound_);
     if (err) {
         const auto reason = parse_error_str(*err);
         spdlog::debug("fd={} parse error: {}, disconnecting", fd, reason);
@@ -349,15 +347,17 @@ void TcpGateway::send_error_direct(const int fd, const ErrorCode code, const std
 }
 
 void TcpGateway::handle_close(const int fd) {
+    // Reset the connection's shared_ptr (ref--;). Any InboundMessages already in the queue hold their
+    // own shared_ptr copies of BufferState, so the buffer and watermark stay alive until necessary
+    connections[fd].buf_state.reset();
 
-    // Enqueuing this message ensures the router will remove this fd from all future rounds
     inbound_.enqueue(InboundMessage {
         .frame = DecodedFrame {
             .header = {},
             .payload = DisconnectMsg {}
         },
         .sender_fd = fd,
-        .watermark_ptr = &consumer_watermark_[fd],  // reset watermark after all stale messages drain
+        .buf_state = nullptr, // We could pass the shared_ptr here but the router doesn't need to write into it, so safe to delete before
         .consumed_up_to = 0
     });
 

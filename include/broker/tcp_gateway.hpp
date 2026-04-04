@@ -30,6 +30,15 @@ inline constexpr size_t READ_BUF_SIZE       = sizeof(FrameHeader) + MAX_PAYLOAD_
 inline constexpr size_t CONN_BUF_CAPACITY   = 131072; // 128KiB, power of two
 inline constexpr size_t OUTBOUND_RING_CAPACITY = 256; // slots per subscriber ring buffer, power of two
 
+// Couple together the conn's receive buf and the watermark (makes lifetime management oh so easy)
+// Before the connections[fd].buf_state is reset, this is neatly shared into any message in the queue so the buffer stays alive in the
+// inbound queue until the router drains all messages parsed from it. At that stage all references will be dead so the buffer is destroyed
+struct BufferState {
+    std::unique_ptr<std::byte[]> buf;
+    alignas(64) std::atomic<uint32_t> watermark{0};
+    explicit BufferState() : buf(std::make_unique<std::byte[]>(CONN_BUF_CAPACITY)) {}
+};
+
 // Lightweight RAII wrapper for listening socket, probably don't need this tbh, might remove in later versions
 class ListeningSocket {
     int fd_;
@@ -66,12 +75,8 @@ enum class ParseStage { AwaitingHeader, AwaitingPayload };
 
 // Per-connection structure. Stores parsing state for recv loop and metadata for send loop.
 struct Connection {
+    std::shared_ptr<BufferState> buf_state{nullptr}; // allocated on accept, dies after router processes all messages parsed from it
 
-    // All messages are read into this buffer.
-    // After the router consumes the message, the watermark is updated to indicate how many bytes have been consumed, 
-    // and the recv loop can compact the buffer by moving remaining data to the front.
-    std::unique_ptr<std::byte[]> buf{nullptr}; // allocated on accept, size = CONN_BUF_CAPACITY
-    
     uint32_t    parse_pos     {0};   // start of unprocessed data
     uint32_t    write_pos     {0};   // end of valid data in buf
     ParseStage  stage         {ParseStage::AwaitingHeader};
@@ -79,12 +84,15 @@ struct Connection {
     bool        active        {false};
 };
 
-// Decoded Message + sender fd + watermark for buffer lifetime signaling
+// Decoded Message + sender fd + buffer state for lifetime management and watermark signaling.
+// Each InboundMessage holds a shared_ptr copy of the connection's BufferState, keeping the
+// receive buffer and watermark alive in the queue until the router processes the message.
+// Null for DisconnectMsg/ShutdownMsg (connection's buf_state has already been reset).
 struct InboundMessage { //NOLINT
     DecodedFrame frame;
     int sender_fd;
-    std::atomic<uint32_t>* watermark_ptr{nullptr}; // null for Disconnect/Shutdown
-    uint32_t consumed_up_to{0};                     // byte offset past this frame in conn buffer
+    std::shared_ptr<BufferState> buf_state{nullptr};
+    uint32_t consumed_up_to{0};
 };
 
 // Pre-encoded frame + destination fd. SBO: most messages fit in the inline buffer; large publishes spill to heap.
@@ -153,16 +161,15 @@ struct OutboundTable {
 };
 
 // Parses and dispatches all complete frames from conn's buffer into inbound.
-// Returns ParseError if a frame is broken
+// Returns ParseError if a frame is broken.
 std::optional<ParseError> dispatch_frames_impl(
     int fd,
     Connection& conn,
-    moodycamel::BlockingConcurrentQueue<InboundMessage>& inbound,
-    std::atomic<uint32_t>& watermark);
+    moodycamel::BlockingConcurrentQueue<InboundMessage>& inbound);
 
-// Watermark-gated compaction: if watermark > 0, memmove remaining bytes to
-// the front and reset parse_pos / write_pos accordingly
-void compact_if_needed(Connection& conn, std::atomic<uint32_t>& watermark);
+// Watermark-gated compaction: if the router has advanced the watermark, memmove
+// remaining bytes to the front and reset parse_pos / write_pos accordingly.
+void compact_if_needed(Connection& conn);
 
 class TcpGateway {
     ListeningSocket listening_socket_;
@@ -175,7 +182,6 @@ class TcpGateway {
     Metrics&                                             metrics_;
 
     std::vector<Connection>            connections;
-    std::vector<std::atomic_uint32_t>  consumer_watermark_; // fd-indexed, router stores after consuming
     std::vector<std::atomic_uint64_t>  outbound_seq_;       // fd-indexed, broker->client monotonic counter
     size_t                             active_connections_count_ {0};
 

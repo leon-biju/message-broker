@@ -19,7 +19,7 @@ void Router::stop() {
     inbound_.enqueue(InboundMessage{
         .frame = DecodedFrame{ .payload = ShutdownMsg{} },
         .sender_fd = -1,
-        .watermark_ptr = nullptr,
+        .buf_state = nullptr,
         .consumed_up_to = 0
     }); // sentinel: unblocks wait_dequeue_bulk
     worker_.join();
@@ -53,8 +53,8 @@ void Router::run_loop() {
 
         // Since all the batch have been consumed, we can safely update the watermarks
         for (size_t i = 0; i < n; ++i) {
-            if (msgs[i].watermark_ptr) {
-                msgs[i].watermark_ptr->store(msgs[i].consumed_up_to, std::memory_order_release);
+            if (msgs[i].buf_state) {
+                msgs[i].buf_state->watermark.store(msgs[i].consumed_up_to, std::memory_order_release);
             }
         }
     }
