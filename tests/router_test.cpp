@@ -35,23 +35,23 @@ static FrameHeader make_hdr(MessageType type, uint64_t seq, bool no_ack) {
 
 static InboundMessage sub_msg(int fd, std::string_view topic, uint64_t seq = 0, bool no_ack = true) {
     return {.frame = {make_hdr(MessageType::SUBSCRIBE, seq, no_ack), SubscribeMsg{topic}},
-            .sender_fd = fd, .watermark_ptr = nullptr, .consumed_up_to = 0};
+            .sender_fd = fd, .buf_state = nullptr, .consumed_up_to = 0};
 }
 
 static InboundMessage unsub_msg(int fd, std::string_view topic, uint64_t seq = 0, bool no_ack = true) {
     return {.frame = {make_hdr(MessageType::UNSUBSCRIBE, seq, no_ack), UnsubscribeMsg{topic}},
-            .sender_fd = fd, .watermark_ptr = nullptr, .consumed_up_to = 0};
+            .sender_fd = fd, .buf_state = nullptr, .consumed_up_to = 0};
 }
 
 static InboundMessage pub_msg(int fd, std::string_view topic, std::span<const std::byte> body,
                               uint64_t seq = 0, bool no_ack = true) {
     return {.frame = {make_hdr(MessageType::PUBLISH, seq, no_ack), PublishMsg{topic, body}},
-            .sender_fd = fd, .watermark_ptr = nullptr, .consumed_up_to = 0};
+            .sender_fd = fd, .buf_state = nullptr, .consumed_up_to = 0};
 }
 
 static InboundMessage disc_msg(int fd) {
     return {.frame = {FrameHeader{}, DisconnectMsg{}},
-            .sender_fd = fd, .watermark_ptr = nullptr, .consumed_up_to = 0};
+            .sender_fd = fd, .buf_state = nullptr, .consumed_up_to = 0};
 }
 
 // Decode an outbound message back to a DecodedFrame (string_views/spans into out.data())

@@ -23,28 +23,26 @@ static std::vector<std::byte> make_subscribe_frame(std::string_view topic, uint6
 class DispatchFramesTest : public ::testing::Test {
 protected:
     moodycamel::BlockingConcurrentQueue<InboundMessage> inbound_;
-    std::atomic<uint32_t>  watermark_{0};
-    Connection             conn_;
+    Connection conn_;
 
     void SetUp() override {
-        conn_.buf       = std::make_unique<std::byte[]>(CONN_BUF_CAPACITY);
+        conn_.buf_state = std::make_shared<BufferState>();
         conn_.parse_pos = 0;
         conn_.write_pos = 0;
         conn_.stage     = ParseStage::AwaitingHeader;
         conn_.active    = true;
-        watermark_.store(0);
     }
 
-    // Copy bytes into conn_.buf at write_pos and advance write_pos.
+    // Copy bytes into conn_.buf_state->buf at write_pos and advance write_pos.
     void feed(const void* data, size_t len) {
-        std::memcpy(conn_.buf.get() + conn_.write_pos, data, len);
+        std::memcpy(conn_.buf_state->buf.get() + conn_.write_pos, data, len);
         conn_.write_pos += static_cast<uint32_t>(len);
     }
     void feed(const std::vector<std::byte>& v) { feed(v.data(), v.size()); }
 
     // Call dispatch_frames_impl (no-error callback since all tests use valid frames).
     std::optional<ParseError> dispatch() {
-        return dispatch_frames_impl(/*fd=*/42, conn_, inbound_, watermark_);
+        return dispatch_frames_impl(/*fd=*/42, conn_, inbound_);
     }
 
     // Drain all enqueued InboundMessages (non-blocking).
@@ -149,15 +147,13 @@ TEST_F(DispatchFramesTest, ExactlyOneByteShort) {
 
 class CompactionTest : public ::testing::Test {
 protected:
-    Connection            conn_;
-    std::atomic<uint32_t> watermark_{0};
+    Connection conn_;
 
     void SetUp() override {
-        conn_.buf       = std::make_unique<std::byte[]>(CONN_BUF_CAPACITY);
+        conn_.buf_state = std::make_shared<BufferState>();
         conn_.parse_pos = 0;
         conn_.write_pos = 0;
         conn_.stage     = ParseStage::AwaitingHeader;
-        watermark_.store(0);
     }
 };
 
@@ -166,14 +162,14 @@ TEST_F(CompactionTest, NoCompactionWhenWatermarkZero) {
     conn_.write_pos = 100;
     conn_.parse_pos = 60;
     // Place a sentinel byte at parse_pos.
-    conn_.buf.get()[60] = std::byte{0x42};
+    conn_.buf_state->buf.get()[60] = std::byte{0x42};
 
-    compact_if_needed(conn_, watermark_);
+    compact_if_needed(conn_);
 
     EXPECT_EQ(conn_.write_pos, 100u);
     EXPECT_EQ(conn_.parse_pos, 60u);
-    EXPECT_EQ(watermark_.load(), 0u);
-    EXPECT_EQ(conn_.buf.get()[60], std::byte{0x42});  // untouched
+    EXPECT_EQ(conn_.buf_state->watermark.load(), 0u);
+    EXPECT_EQ(conn_.buf_state->buf.get()[60], std::byte{0x42});  // untouched
 }
 
 // When watermark > 0 compaction fires: remaining bytes shift to front and
@@ -182,21 +178,23 @@ TEST_F(CompactionTest, CompactionFiresAndResetsPointers) {
     // Bytes [40..69] are "remaining" (not yet consumed by the parser).
     conn_.write_pos = 70;
     conn_.parse_pos = 40;
-    watermark_.store(40);
+    conn_.buf_state->watermark.store(40);
 
     // Write a known pattern into [40..69].
-    for (uint32_t i = 0; i < 30; ++i)
-        conn_.buf.get()[40 + i] = std::byte{static_cast<uint8_t>(i)};
+    for (uint32_t i = 0; i < 30; ++i) {
+        conn_.buf_state->buf.get()[40 + i] = std::byte{static_cast<uint8_t>(i)};
+    }
 
-    compact_if_needed(conn_, watermark_);
+    compact_if_needed(conn_);
 
-    EXPECT_EQ(conn_.write_pos, 30u);   // 70 - 40
-    EXPECT_EQ(conn_.parse_pos, 0u);    // 40 - 40
-    EXPECT_EQ(watermark_.load(), 0u);  // reset
+    EXPECT_EQ(conn_.write_pos, 30u);                          // 70 - 40
+    EXPECT_EQ(conn_.parse_pos, 0u);                           // 40 - 40
+    EXPECT_EQ(conn_.buf_state->watermark.load(), 0u);         // reset
 
     // Bytes [0..29] must now match the original [40..69] pattern.
-    for (uint32_t i = 0; i < 30; ++i)
-        EXPECT_EQ(conn_.buf.get()[i], std::byte{static_cast<uint8_t>(i)}) << "mismatch at i=" << i;
+    for (uint32_t i = 0; i < 30; ++i) {
+        EXPECT_EQ(conn_.buf_state->buf.get()[i], std::byte{static_cast<uint8_t>(i)}) << "mismatch at i=" << i;
+    }
 }
 
 // A valid frame whose bytes were shifted by compaction is still decoded correctly.
@@ -209,22 +207,23 @@ TEST_F(CompactionTest, FrameStradlingBoundaryDecodedCorrectly) {
 
     // Simulate: 50 bytes of a previously-consumed frame sit at [0..49].
     // The new frame starts at byte 50.
-    for (uint32_t i = 0; i < 50; ++i)
-        conn_.buf.get()[i] = std::byte{0xFF};  // garbage from old frame
-    std::memcpy(conn_.buf.get() + 50, frame.data(), fsize);
+    for (uint32_t i = 0; i < 50; ++i) {
+        conn_.buf_state->buf.get()[i] = std::byte{0xFF};  // garbage from old frame
+    }
+    std::memcpy(conn_.buf_state->buf.get() + 50, frame.data(), fsize);
 
     conn_.write_pos = 50 + fsize;
     conn_.parse_pos = 50;
-    watermark_.store(50);
+    conn_.buf_state->watermark.store(50);
 
     // Compact: shifts the frame bytes to the front.
-    compact_if_needed(conn_, watermark_);
+    compact_if_needed(conn_);
     EXPECT_EQ(conn_.write_pos, fsize);
     EXPECT_EQ(conn_.parse_pos, 0u);
-    EXPECT_EQ(watermark_.load(), 0u);
+    EXPECT_EQ(conn_.buf_state->watermark.load(), 0u);
 
     // Now dispatch — the frame should be decoded from its new position.
-    const auto err = dispatch_frames_impl(/*fd=*/99, conn_, inbound, watermark_);
+    const auto err = dispatch_frames_impl(/*fd=*/99, conn_, inbound);
     EXPECT_FALSE(err);
 
     InboundMessage msg;
